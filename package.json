@@ -1,0 +1,13 @@
+{
+  "name": "animax-server",
+  "version": "1.0.0",
+  "description": "Servidor privado de búsqueda para AniMax (estilo Seekee). Node.js puro, cero dependencias.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "license": "MIT"
+}
