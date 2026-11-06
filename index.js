@@ -22,7 +22,7 @@
 
 'use strict';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PORT = Number(process.env.PORT || process.env.ANIMAX_PORT || 3001);
 const API_KEY = process.env.ANIMAX_API_KEY || '';   // vacío = abierto (uso personal)
 const STARTED = Date.now();
@@ -462,6 +462,21 @@ async function fetchDescription(pageUrl) {
    7. Lista COMPLETA de episodios de una página (sin límite de 12)
    ══════════════════════════════════════════════════════════════════ */
 
+/* FASE 3 (v2.1, bug "episodios que se meten en páginas y no
+   reproducen"): URLs de PAGINACIÓN y listados que NO son episodios.
+   Antes, enlaces como "/episodios/page/2" o "?pagina=3" entraban en la
+   lista como si fueran episodios y al tocarlos no reproducían nada
+   (eran páginas de listado, no reproductores). */
+const PAGINATION_RE = /\/page\/\d+(?:\/|$)|[?&](page|pagina|pag|pg|p)=\d+|\/paginas?\/\d+|\/listado?\//i;
+function isPagination(u) {
+  try {
+    const pu = new url.URL(u);
+    // Ruta con /page/N o /pagina/N, o query de paginación.
+    if (PAGINATION_RE.test(pu.pathname + pu.search)) return true;
+    return false;
+  } catch { return PAGINATION_RE.test(u); }
+}
+
 async function buildEpisodes(pageUrl) {
   const html = await fetchHtml(pageUrl);
   if (!html) return { episodes: [], error: 'no-page' };
@@ -471,6 +486,7 @@ async function buildEpisodes(pageUrl) {
     const abs = absolutize(m[1], pageUrl);
     if (!abs || !isHttp(abs) || looksLikeAd(abs)) continue;
     if (hostOf(abs) !== hostOf(pageUrl)) continue; // enlaces internos
+    if (isPagination(abs)) continue; // FASE 3: nunca paginación como episodio
     const text = stripTags(m[2]);
     const combined = text + ' ' + abs;
     let n = null;
@@ -489,6 +505,8 @@ async function buildEpisodes(pageUrl) {
     while ((m = RE.ANCHOR.exec(html)) !== null) {
       const abs = absolutize(m[1], pageUrl);
       if (!abs || !isHttp(abs) || hostOf(abs) !== hostOf(pageUrl)) continue;
+      // FASE 3: los enlaces de paginación NO llevan a episodios.
+      if (isPagination(abs)) continue;
       if (/(temporada|season|capitulo|cap[ií]tulos|episodio|episodios)/i.test(abs) && !looksLikeAd(abs)) {
         if (!hubLinks.some(l => l === abs)) hubLinks.push(abs);
       }
@@ -501,6 +519,7 @@ async function buildEpisodes(pageUrl) {
       while ((m = RE.ANCHOR.exec(h2)) !== null) {
         const abs = absolutize(m[1], hub);
         if (!abs || !isHttp(abs) || hostOf(abs) !== hostOf(pageUrl)) continue;
+        if (isPagination(abs)) continue; // FASE 3: sin paginación
         const text = stripTags(m[2]);
         const combined = text + ' ' + abs;
         let mm = combined.match(RE.EP_NUM);
