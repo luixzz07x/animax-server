@@ -1,28 +1,43 @@
 #!/usr/bin/env node
 /* ══════════════════════════════════════════════════════════════════════
    ║  ANIMAX SERVER · Servidor privado de búsqueda (estilo Seekee)      ║
-   ║  v1.0.0 — Node.js PURO, CERO dependencias                          ║
+   ║  v1.2.0 — Node.js PURO, CERO dependencias                          ║
    ╚═════════════════════════════════════════════════════════════════════
    El teléfono lento ya NO busca: le pregunta a este servidor y este
    hace todo el trabajo pesado (abrir páginas, encontrar el video
    escondido, validar que sirva) y devuelve JSON listo para reproducir.
 
+   v1.2.0 — TÉCNICAS EXTRAÍDAS DEL APK DE SEEKEE (com.enzo.paulo 1.4.0):
+     · "queryFreshDomainList": Seekee mantiene en SU servidor la lista
+       de dominios VIGENTES de los sitios de contenido (cambian de
+       dominio constantemente). Aquí: SITES + búsquedas Bing "site:"
+       — el filtro anti-piratería de Bing devuelve 0 resultados (b_no)
+       para "ver X online latino" desde IPs de datacenter, pero las
+       consultas site: SÍ devuelven los 10 resultados.
+     · "filmCenter/stream": Seekee entrega los streams YA resueltos
+       con variantes. Aquí: /api/resolve abre los .m3u8 MASTER y añade
+       cada variante (#EXT-X-STREAM-INF) como espejo propio con su
+       CALIDAD REAL ("720p", "1080p") y además devuelve la lista de
+       EPISODIOS para cambiar de capítulo desde el reproductor.
+
    Endpoints (todos devuelven JSON):
      GET  /api/ping                  → estado del servidor
+     GET  /api/domains               → dominios de contenido configurados
      GET  /api/search?q=one piece    → opciones [Doblado]/[Sub] + descripción
      GET  /api/episodes?pageUrl=...  → lista COMPLETA de episodios (sin límite)
      POST /api/resolve {pageUrl,episodeUrl?,episode?}
-                                      → servidores de video ordenados + headers
+                                      → servidores + CALIDADES reales + EPISODIOS
      POST /api/validate {url,referer}→ ¿este stream sirve?
 
    Configuración (variables de entorno, opcionales):
      PORT            puerto (default 3001; Render/Fly lo inyectan solos)
      ANIMAX_API_KEY  si se define, los clientes deben enviar X-Api-Key
+     ANIMAX_SITES    dominios extra separados por coma (se suman a SITES)
    ══════════════════════════════════════════════════════════════════════ */
 
 'use strict';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const PORT = Number(process.env.PORT || process.env.ANIMAX_PORT || 3001);
 const API_KEY = process.env.ANIMAX_API_KEY || '';   // vacío = abierto (uso personal)
 const STARTED = Date.now();
@@ -123,7 +138,20 @@ function request(target, options = {}) {
         if (options.onlyHead) { res.resume(); return resolve({ ok: status < 400, status, headers: res.headers, body: '' }); }
         const chunks = []; let total = 0; let aborted = false;
         res.on('data', (c) => {
-          if (total + c.length > maxBytes) { if (!aborted) { aborted = true; req.destroy(); } return; }
+          if (total + c.length > maxBytes) {
+            if (!aborted) {
+              // Límite alcanzado: resolver con lo recogido (antes el
+              // destroy() dejaba la promesa colgada para siempre).
+              aborted = true;
+              resolve({
+                ok: status >= 200 && status < 400, status, headers: res.headers,
+                body: Buffer.concat(chunks).toString('utf8'),
+                ms: Date.now() - startedAt, truncated: true
+              });
+              req.destroy();
+            }
+            return;
+          }
           total += c.length; chunks.push(c);
         });
         res.on('end', () => resolve({
@@ -232,11 +260,113 @@ function farmScore(u) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   4. Búsqueda web (Bing → DuckDuckGo), port del cazador
-      Bing va PRIMERO: DDG bloquea IPs de datacenter (202) y en Render
-      viviremos en un datacenter. Con UA de escritorio Bing sirve la
-      página completa (b_algo) y los enlaces /ck/a se decodifican.
+   4. BÚSQUEDA DIRECTA EN SITIOS (modelo Buscari/Seekee) + Bing respaldo
    ══════════════════════════════════════════════════════════════════ */
+
+/* DOMINIOS DE CONTENIDO (técnica "queryFreshDomainList" de Seekee):
+   los sitios de anime/pelis cambian de dominio cada pocas semanas.
+   La búsqueda va DIRECTA a cada sitio (su buscador interno) — sin
+   motor de búsqueda en medio: ni filtros anti-piratería (Bing "b_no"
+   para "ver X online" desde datacenters), ni bloqueos por ráfagas.
+   Plantillas tomadas del providers.json de la app (886 fuentes).
+   Ampliar con ANIMAX_SITES="host|plantilla|idioma,host2|...|..." */
+const DIRECT_SITES = [
+  // ✓ verificados (responden con resultados reales)
+  { host: 'tioanime.com', tpl: 'https://tioanime.com/directorio?q={q}', lang: 'sub' },
+  { host: 'monoschinos.st', tpl: 'https://monoschinos.st/buscar?q={q}', lang: 'latino' },
+  // plantillas de providers.json (la app las usa en su caza WebView)
+  { host: 'otakustv.com', tpl: 'https://otakustv.com/buscar?q={q}', lang: 'latino' },
+  { host: 'veranimes.net', tpl: 'https://veranimes.net/buscar?q={q}', lang: 'latino' },
+  { host: 'animelatinohd.net', tpl: 'https://animelatinohd.net/?s={q}', lang: 'latino' },
+  { host: 'animeflv.net', tpl: 'https://animeflv.net/browse?q={q}', lang: 'sub' },
+  { host: 'jkanime.net', tpl: 'https://jkanime.net/directorio?q={q}', lang: 'sub' },
+  { host: 'animefenix.com', tpl: 'https://animefenix.com/browse?q={q}', lang: 'sub' },
+  { host: 'animeid.to', tpl: 'https://animeid.to/browse?q={q}', lang: 'sub' },
+  { host: 'gogoanimehd.io', tpl: 'https://gogoanimehd.io/search.html?keyword={q}', lang: 'sub' },
+  { host: 'yugenanime.tv', tpl: 'https://yugenanime.tv/discover/?q={q}', lang: 'sub' },
+  { host: 'kickassanime.mx', tpl: 'https://kickassanime.mx/search?q={q}', lang: 'sub' }
+];
+function allDirectSites() {
+  const base = [...DIRECT_SITES];
+  const extra = (process.env.ANIMAX_SITES || '').split(',').map(s => s.trim()).filter(Boolean);
+  for (const e of extra) {
+    const [host, tpl, lang] = e.split('|');
+    if (!host || !tpl) continue;
+    base.push({ host, tpl, lang: lang || 'sub' });
+  }
+  return base;
+}
+function allSites() {
+  return [...new Set(allDirectSites().map(s => s.host))];
+}
+
+/** Búsqueda DIRECTA: abre el buscador interno de cada sitio y recoge
+ *  los enlaces de series/películas que casan con el query. Devuelve
+ *  hits con el idioma HEREDADO DEL SITIO (monoschinos → latino). */
+async function directSiteSearch(query) {
+  const sites = allDirectSites();
+  const qWords = normalizeTitle(query).split(' ').filter(w => w.length >= 3);
+  const results = await Promise.all(sites.map(async site => {
+    const searchUrl = site.tpl.replace('{q}', encodeURIComponent(query));
+    const res = await request(searchUrl, { timeoutMs: 8000 });
+    if (!res.ok || !res.body) return [];
+    const hits = [];
+    let m; RE.ANCHOR.lastIndex = 0;
+    while ((m = RE.ANCHOR.exec(res.body)) !== null) {
+      const abs = absolutize(m[1], searchUrl);
+      if (!abs || !isHttp(abs)) continue;
+      if (hostOf(abs) !== hostOf(searchUrl)) continue;   // enlaces internos
+      if (isPagination(abs)) continue;                    // ni paginación
+      if (RE.EP_NUM.test(m[2] + ' ' + abs)) continue;     // ni episodios sueltos
+      if (looksLikeAd(abs)) continue;
+      // Nunca enlaces de BÚSQUEDA/navegación (la propia página de
+      // resultados, filtros, "todos los resultados"…): sus URLs llevan
+      // el query dentro y colaban en los resultados.
+      if (/[?&](q|s|search|keyword|query|titulo)=/i.test(abs)) continue;
+      if (/\/(buscar|search|directorio|browse|discover)(\/|$|\?)/i.test(abs)) continue;
+      const text0 = stripTags(m[2]);
+      // Tarjetas de imagen (monoschinos…): el texto del enlace acumula
+      // título + etiquetas + temporadas (>90 caracteres y se descartaba);
+      // el atributo alt del <img> es el TÍTULO LIMPIO → preferirlo.
+      const alt = htmlUnescape((m[2].match(/<img[^>]+alt="([^"]{3,120})"/) || [])[1] || '').trim();
+      let text = (alt.length >= 3 && qWords.every(w => normalizeTitle(alt).includes(w)))
+        ? alt : text0;
+      if (!text || text.length < 3) continue;
+      if (text.length > 90) text = text.slice(0, 87) + '…';
+      // TODAS las palabras del query deben estar en el TÍTULO del
+      // enlace (es el nombre de la obra en estos sitios).
+      const tNorm = normalizeTitle(text);
+      if (qWords.length && !qWords.every(w => tNorm.includes(w))) continue;
+      // enlaces de obra: que no sean el home ni categorías genéricas.
+      const path = abs.replace(/^https?:\/\/[^\/]+/, '');
+      if (path === '/' || path.length < 3) continue;
+      // Idioma POR URL (monoschinos: "…-sub-espanol" / "…-latino");
+      // si la URL no lo dice, el idioma por defecto del sitio.
+      const u = abs.toLowerCase();
+      const lang = /latino|doblado/.test(u) ? 'latino'
+        : /castellano/.test(u) ? 'castellano'
+        : /sub-?espanol|subtitulado/.test(u) ? 'sub'
+        : site.lang;
+      hits.push({ title: text, url: abs, siteLang: lang });
+    }
+    // dedupe por URL dentro del sitio y queda con los 4 mejores.
+    const seen = new Set(); const out = [];
+    for (const h of hits) {
+      const k = h.url.split('#')[0].replace(/\/+$/, '');
+      if (seen.has(k)) continue;
+      seen.add(k); out.push(h);
+      if (out.length >= 4) break;
+    }
+    if (process.env.ANIMAX_DEBUG) {
+      console.error('[debug] site', JSON.stringify({
+        host: site.host, ok: res.ok, status: res.status,
+        raw: hits.length, kept: out.length
+      }));
+    }
+    return out;
+  }));
+  return results.flat();
+}
 
 /** Decodifica los enlaces de redirección de Bing: 
  *  https://www.bing.com/ck/a?!&&p=…&u=a1<base64url del destino> */
@@ -253,7 +383,7 @@ function decodeBingLink(link) {
   } catch { return link; }
 }
 
-async function searchWeb(query, maxHits = 14) {
+async function searchWeb(query, maxHits = 14, opts = {}) {
   const q = encodeURIComponent(query);
   const hits = [];
 
@@ -273,6 +403,9 @@ async function searchWeb(query, maxHits = 14) {
   if (hits.length) return dedupeHits(hits).slice(0, maxHits);
 
   // ── Motor 2: DuckDuckGo lite (a veces bloquea datacenters con 202) ─
+  // En el respaldo de buildOptions se salta (skipDdg): su timeout de 9 s
+  // por consulta vacía hacía la búsqueda eterna.
+  if (opts.skipDdg) return [];
   const ddg = await request(`https://html.duckduckgo.com/html/?q=${q}&kl=es-es`, { userAgent: ENGINE_UA, bare: true });
   if (ddg.ok && ddg.status !== 202 && ddg.body) {   // 202 = desafño/bloqueo
     let m; RE.DDG_LINK.lastIndex = 0;
@@ -335,6 +468,46 @@ function extractFromHtml(html, pageUrl) {
       if (!found.has(abs)) found.set(abs, { url: abs, label: 'Reproductor (' + h + ')', isIframe: true, referer: pageUrl });
     }
   }
+  // c) v1.2 · Matrices JS de servidores (tioanime y clones):
+  //    var videos = [["YourUpload","https:\/\/www.yourupload.com\/embed\/.."],…]
+  //    Las URLs van ESCAPADAS (\/) → las regex de arriba no las ven.
+  const jsVars = html.match(/var\s+videos\s*=\s*(\[\[[\s\S]{0,6000}?\]\])/);
+  if (jsVars) {
+    const pairRe = /\[\s*"([^"]{1,24})"\s*,\s*"((?:[^"\\]|\\.)*)"/g;
+    let p;
+    while ((p = pairRe.exec(jsVars[1])) !== null) {
+      const name = p[1];
+      const abs = p[2].replace(/\\\//g, '/').replace(/\\"/g, '"').replace(/\\u002[Ff]/gi, '/');
+      if (!isHttp(abs) || looksLikeAd(abs) || abs.length > 600) continue;
+      if (!found.has(abs)) {
+        found.set(abs, {
+          url: abs, label: `${name} (${hostOf(abs)})`,
+          isIframe: true, referer: pageUrl, serverName: name
+        });
+      }
+    }
+  }
+  // d) v1.2 · Enlaces directos a la granja (monoschinos y clones): el
+  //    episodio lista los servidores como ANCLAS ("direct-link"), no
+  //    como iframes — ej. <a href="…mp4upload.com/xyz.html">. Solo
+  //    PÁGINAS DE VIDEO (embed/… o id.html), nunca la navegación del
+  //    sitio (premium, login, dmca… colaban como espejos).
+  RE.ANCHOR.lastIndex = 0;
+  while ((m = RE.ANCHOR.exec(html)) !== null) {
+    const abs = absolutize(m[1], pageUrl);
+    if (!abs || !isHttp(abs) || looksLikeAd(abs) || abs.length > 600) continue;
+    if (farmScore(abs) <= 0 || found.has(abs)) continue;
+    let path = '';
+    try { path = new url.URL(abs).pathname; } catch {}
+    const videoish = /\/(embed|e|d|v|video|watch)\//i.test(path) ||
+      /^\/[a-z0-9]{6,}\.html?$/i.test(path);
+    if (videoish) {
+      found.set(abs, {
+        url: abs, label: `${farmName(abs)} (enlace del sitio)`,
+        isIframe: true, referer: pageUrl
+      });
+    }
+  }
   return [...found.values()];
 }
 
@@ -371,15 +544,23 @@ function normalizeTitle(t) {
 
 /** Agrupa hits en OPCIONES estilo Seekee: una por (título, idioma). */
 async function buildOptions(query) {
-  const rounds = await Promise.all([
-    searchWeb(`ver ${query} latino online`),
-    searchWeb(`ver ${query} sub español`),
-    searchWeb(`${query} episodio`),
-    searchWeb(`${query} anime online gratis`),
-    searchWeb(`ver ${query} capítulos español`),
-    searchWeb(query)
-  ]);
-  const all = dedupeHits(rounds.flat());
+  /* OLEADA 1 (v1.2, modelo Buscari/Seekee): búsqueda DIRECTA en el
+     buscador interno de cada sitio de contenido. Sin motor de búsqueda
+     en medio → sin filtros anti-piratería, sin bloqueos por ráfagas. */
+  let all = dedupeHits(await directSiteSearch(query));
+
+  /* OLEADA 2 (respaldo, solo si la directa trajo poco): Bing con las
+     frases "ver X online" — funcionan desde IPs residenciales (servidor
+     en casa) pero Bing las vacía desde datacenters. SECUENCIAL y con
+     1,2 s de separación: las ráfagas paralelas provocan bloqueo. */
+  if (all.length < 6) {
+    for (const q of [`ver ${query} latino online`, `ver ${query} sub español`, query]) {
+      const hits = await searchWeb(q, 14, { skipDdg: true });
+      all = dedupeHits([...all, ...hits]);
+      if (all.length >= 12) break;
+      await new Promise(r => setTimeout(r, 1200));
+    }
+  }
 
   const groups = new Map(); // clave: titleNorm|lang
   for (const hit of all) {
@@ -393,8 +574,10 @@ async function buildOptions(query) {
     // query: con una sola palabra pasaba basura como "OneDrive" para
     // "one piece".
     const qWords = normalizeTitle(query).split(' ').filter(w => w.length >= 3);
-    if (qWords.length && !qWords.every(w => titleNorm.includes(w))) continue;
-    const lang = classifyLang(hit.title + ' ' + hit.url);
+    if (qWords.length && !qWords.every(w => titleNorm.includes(w) || normalizeTitle(hit.url).includes(w))) continue;
+    // Idioma: el DEL SITIO directo manda (monoschinos → latino); si no
+    // viene de búsqueda directa, se clasifica por título/URL.
+    const lang = hit.siteLang || classifyLang(hit.title + ' ' + hit.url);
     const key = titleNorm.slice(0, 40) + '|' + lang;
     if (!groups.has(key)) {
       groups.set(key, {
@@ -493,7 +676,10 @@ async function buildEpisodes(pageUrl) {
     let mm = combined.match(RE.EP_NUM);
     if (mm) n = parseInt(mm[1], 10);
     if (n == null) { mm = abs.match(RE.EP_HREF); if (mm) n = parseInt(mm[1], 10); }
-    if (n == null || n < 1 || n > 2000) continue;
+    // v1.2: n=0 aceptado (series como Boruto empiezan en "episodio-0";
+    // el cliente filtra n>=1 al mostrar). Sin esto, monoschinos quedaba
+    // sin NINGÚN episodio (solo lista el último vía AJAX).
+    if (n == null || n < 0 || n > 2000) continue;
     if (!byNumber.has(n)) byNumber.set(n, { n, url: abs, text: text.slice(0, 80) });
   }
   // Si la página es un HUB sin episodios listados (paginación), buscar
@@ -561,6 +747,76 @@ async function buildEpisodes(pageUrl) {
       }
     }
   }
+  // ── v1.2 · EPISODIOS EN VARIABLE JS (tioanime y clones) ────────────
+  // La lista vive en "var episodes = [220,219,…]" y las URLs siguen el
+  // patrón "/ver/{slug}-{n}". Se validan DOS muestras reales antes de
+  // sintetizar el rango completo.
+  if (byNumber.size < 3) {
+    const jsEps = html.match(/var\s+episodes\s*=\s*\[([\d,\s]+)\]/);
+    const slug = (pageUrl.match(/\/anime\/([^\/?#]+)/) || [])[1];
+    if (process.env.ANIMAX_DEBUG) {
+      console.error('[debug] jsEps', JSON.stringify({
+        byNumber: byNumber.size, jsEps: !!jsEps, slug: slug || null,
+        htmlBytes: html.length
+      }));
+    }
+    if (jsEps && slug) {
+      const nums = jsEps[1].split(',').map(s => parseInt(s, 10)).filter(n => n > 0 && n <= 2000);
+      if (nums.length >= 3) {
+        const maxN = Math.max(...nums);
+        // OJO: new URL() codificaría "{N}" como %7BN%7D — construir a mano.
+        const origin = new url.URL(pageUrl).origin;
+        const template = origin + '/ver/' + slug + '-{N}';
+        // validar 2 episodios sintetizados (el primero y uno intermedio)
+        const checks = [1, Math.min(maxN, 12)];
+        const oks = await Promise.all(checks.map(n =>
+          request(template.replace('{N}', String(n)), { onlyHead: false, timeoutMs: 8000, maxBytes: 4096 })
+            .then(r => { if (process.env.ANIMAX_DEBUG) console.error('[debug] check ep', n, '→', r.ok, r.status, r.error || ''); return !!r.ok; })
+        ));
+        if (oks.every(Boolean)) {
+          for (let n = 1; n <= Math.min(maxN, 1300); n++) {
+            if (!byNumber.has(n)) {
+              byNumber.set(n, { n, url: template.replace('{N}', String(n)), text: 'Episodio ' + n, synth: true });
+            }
+          }
+          episodes = [...byNumber.values()].sort((a, b) => a.n - b.n);
+        }
+      }
+    }
+  }
+  // ── v1.2 · SÍNTESIS GENÉRICA POR PATRÓN DE URL ────────────────────
+  // monoschinos solo lista el ÚLTIMO episodio en el HTML (el resto llega
+  // por AJAX), pero la URL es uniforme ("/ver/{slug}-episodio-N"). Con
+  // un solo episodio conocido se deriva la plantilla y se SONDEA
+  // (1, 12, 60, 150, 300): se sintetiza hasta el último sondeo que
+  // responda — nunca se inventan episodios rotos.
+  if (byNumber.size >= 1 && byNumber.size < 3) {
+    const seed = [...byNumber.values()].sort((a, b) => a.n - b.n)[0];
+    const dm = seed.url.match(/\d{1,4}(?!.*\d)/);
+    if (dm) {
+      const idx = seed.url.lastIndexOf(dm[0]);
+      const template = seed.url.slice(0, idx) + '{N}' + seed.url.slice(idx + dm[0].length);
+      const already = template.replace('{N}', String(seed.n));
+      if (already === seed.url) {
+        const probes = [1, 12, 60, 150, 300];
+        let lastOk = 0;
+        for (const n of probes) {
+          if (byNumber.has(n)) { lastOk = n; continue; }
+          const r = await request(template.replace('{N}', String(n)), { timeoutMs: 7000, maxBytes: 4096 });
+          if (!r.ok) break;
+          lastOk = n;
+        }
+        if (lastOk > 0) {
+          for (let n = 1; n <= Math.min(lastOk, 1300); n++) {
+            if (!byNumber.has(n)) {
+              byNumber.set(n, { n, url: template.replace('{N}', String(n)), text: 'Episodio ' + n, synth: true });
+            }
+          }
+          episodes = [...byNumber.values()].sort((a, b) => a.n - b.n);
+        }
+      }
+    }
+  }
   return { episodes, total: episodes.length, page: pageUrl };
 }
 
@@ -580,6 +836,40 @@ async function quickValidate(streamUrl, referer) {
   if (!res.ok) return false;
   const type = String(res.headers['content-type'] || '').toLowerCase();
   return /video\/|audio\/|mpegurl|octet-stream|mp2t|dash/.test(type) || type === '';
+}
+
+/* ── v1.2 (técnica filmCenter/stream de Seekee): CALIDADES REALES ──
+   Un .m3u8 MASTER contiene una lista de variantes (#EXT-X-STREAM-INF):
+   240p · 360p · 480p · 720p · 1080p… Cada variante es un stream REAL
+   y reproducible por sí solo. Las devolvemos como espejos etiquetados
+   con su calidad: cambiar de calidad = cambiar de espejo (funciona de
+   verdad, no es un ajuste cosmético de pista). */
+async function expandHlsVariants(candidate) {
+  if (!/\.m3u8(\?|$)/i.test(candidate.url)) return [];
+  const res = await request(candidate.url, {
+    headers: candidate.referer ? { Referer: candidate.referer } : {},
+    accept: 'video/*,*/*;q=0.8',
+    timeoutMs: 8000,
+    maxBytes: 256 * 1024
+  });
+  if (!res.ok || !res.body || !res.body.includes('#EXT-X-STREAM-INF')) return [];
+  const lines = res.body.split(/\r?\n/);
+  const variants = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
+    const next = (lines[i + 1] || '').trim();
+    if (!next || next.startsWith('#')) continue;
+    const m = lines[i].match(/RESOLUTION=(\d+)x(\d+)/);
+    const height = m ? parseInt(m[2], 10) : 0;
+    const abs = absolutize(next, candidate.url);
+    if (!abs || !isHttp(abs)) continue;
+    variants.push({ height, url: abs });
+  }
+  // Sin RESOLUTION en el master → no podemos etiquetar; descartar.
+  const labeled = variants.filter(v => v.height > 0)
+    .sort((a, b) => b.height - a.height);
+  // Evitar duplicar la URL del propio master (variante única).
+  return labeled.filter(v => v.url !== candidate.url);
 }
 
 async function resolveStream({ pageUrl, episodeUrl, episode }) {
@@ -626,6 +916,31 @@ async function resolveStream({ pageUrl, episodeUrl, episode }) {
   const verdicts = await Promise.all(toValidate.map(c => quickValidate(c.url, c.referer).then(v => [c, v])));
   for (const [c, v] of verdicts) c.validated = v;
 
+  // Paso 5b (v1.2): abrir los m3u8 MASTER validados y añadir cada
+  // variante como espejo propio ("Streamtape · 720p") — calidades REALES.
+  const validatedDirect = candidates.filter(c => c.validated === true).slice(0, 4);
+  const variantResults = await Promise.all(
+    validatedDirect.map(c => expandHlsVariants(c).then(vs => [c, vs]))
+  );
+  const variantMirrors = [];
+  for (const [master, vars] of variantResults) {
+    for (const v of vars.slice(0, 6)) {
+      const dup = candidates.some(c => c.url === v.url);
+      if (dup) continue;
+      const extra = {
+        url: v.url,
+        label: `HLS ${v.height}p (variante real)`,
+        isIframe: false,
+        referer: master.referer,
+        quality: `${v.height}p`,
+        validated: true,
+        variantOf: master.url
+      };
+      candidates.push(extra);
+      variantMirrors.push(extra);
+    }
+  }
+
   const ordered = [
     ...candidates.filter(c => c.validated === true),
     ...candidates.filter(c => !c.isIframe && c.validated !== true),
@@ -634,9 +949,10 @@ async function resolveStream({ pageUrl, episodeUrl, episode }) {
 
   const mirrors = ordered.map(c => ({
     url: c.url,
-    label: `${farmName(c.url)} · ${c.label}`,
+    label: `${farmName(c.url)} · ${c.quality ? c.quality + ' · ' : ''}${c.label}`,
     isIframe: c.isIframe,
     server: farmName(c.url),
+    quality: c.quality || '',
     validated: c.validated === true,
     headers: {
       'User-Agent': userAgentFor(c.url),
@@ -644,12 +960,24 @@ async function resolveStream({ pageUrl, episodeUrl, episode }) {
     }
   }));
 
+  // Paso 6 (v1.2, técnica filmCenter de Seekee): lista de EPISODIOS en
+  // la MISMA respuesta — así el reproductor muestra los capítulos sin
+  // una segunda petición (y en pantalla completa, desde el botón
+  // "Episodios"). Solo para páginas de serie (películas: lista vacía).
+  let episodes = [];
+  if (pageUrl && isHttp(pageUrl)) {
+    const epResult = await buildEpisodes(pageUrl);
+    episodes = (epResult.episodes || []).slice(0, 1300);
+  }
+
   return {
     mirrors,
     best: mirrors[0] || null,
     scanned,
     notes,
-    target
+    target,
+    episodes: episodes.map(e => ({ n: e.n, url: e.url, text: e.text, synth: !!e.synth })),
+    episodeCount: episodes.length
   };
 }
 
@@ -716,6 +1044,17 @@ const server = http.createServer(async (req, res) => {
         ok: true, server: 'animax-server', version: VERSION,
         uptime: Math.round((Date.now() - STARTED) / 1000) + 's',
         cache: cache.size, port: PORT
+      });
+    }
+
+    /* ── GET /api/domains → dominios de contenido (estilo Seekee) ── */
+    if (path === '/api/domains' && req.method === 'GET') {
+      return json(res, 200, {
+        ok: true,
+        version: VERSION,
+        domains: allSites(),
+        sites: allDirectSites(),
+        note: 'Añade sitios con ANIMAX_SITES="host|plantillaCon{q}|idioma,..."'
       });
     }
 
