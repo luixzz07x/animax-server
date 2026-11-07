@@ -1,7 +1,7 @@
 {
   "name": "animax-server",
-  "version": "1.0.0",
-  "description": "Servidor privado de búsqueda para AniMax (estilo Seekee). Node.js puro, cero dependencias.",
+  "version": "2.0.0",
+  "description": "AniMax Server v2.0 — multi-fuente (anime latino/sub, películas, series, doramas), granja profunda, rankings",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
