@@ -39,17 +39,20 @@
      POST /api/resolve {pageUrl,episodeUrl?,episode?} · /api/validate
      GET  /api/hot?tab=anime|peliculas|series|minidramas · /api/related?q=
      GET  /api/home · /api/adblock (EasyList digerida a hosts, v3.0)
+     GET  /api/adblock/hide (selectores de ocultación de elementos, v4.0 Fase 6)
      GET/POST/DELETE /api/history?deviceId= (historial sincronizado, v3.0 Fase 5)
 
    Variables de entorno (todas opcionales):
      PORT · ANIMAX_API_KEY · ANIMAX_SITES (host|tpl|lang|kind,...)
      ANIMAX_DUB_RANGES ("titulo:1-837,...") · ANIMAX_PROXY (u:p@h:p)
+     ANIMAX_WATCHDOG_MIN (ciclo del watchdog, defecto 360=6h)
+     ANIMAX_WATCHDOG_OFF=1 (desactiva la rotación de dominios)
      ANIMAX_DEBUG=1
    ══════════════════════════════════════════════════════════════════════ */
 
 'use strict';
 
-const VERSION = '2.0.0';
+const VERSION = '4.0.4';  // v4.0 (Fase 4): FilmCenter completo — teatros, géneros, subPage con filtros, fichas + Jikan/TMDB
 const PORT = Number(process.env.PORT || process.env.ANIMAX_PORT || 3001);
 const API_KEY = process.env.ANIMAX_API_KEY || '';   // vacío = abierto (uso personal)
 const PROXY = process.env.ANIMAX_PROXY || '';       // user:pass@host:port
@@ -152,6 +155,13 @@ function request(target, options = {}) {
             ...(options.headers || {})
           };
 
+      // v4.0 (Fase 2) · cuerpo opcional para POST (búsqueda DuckDuckGo html).
+      if (options.body) {
+        baseHeaders['Content-Type'] =
+          (options.headers && options.headers['Content-Type']) ||
+          'application/x-www-form-urlencoded';
+        baseHeaders['Content-Length'] = Buffer.byteLength(options.body);
+      }
       const mkRequest = (socket) => {
         const reqOpts = {
           method: options.method || 'GET',
@@ -204,7 +214,7 @@ function request(target, options = {}) {
         });
         req.on('timeout', () => { req.destroy(); finish({ ok: false, error: 'timeout' }); });
         req.on('error', () => finish({ ok: false, error: 'network' }));
-        req.end();
+        req.end(options.body || null);
       };
 
       // Con proxy: túnel CONNECT para https; http va directo al proxy.
@@ -352,7 +362,7 @@ const SITE_CATALOG = [
   { host: 'doramasflix.in', tpl: 'https://doramasflix.in/buscar?q={q}', lang: 'latino', kind: 'dorama' }
 ];
 
-function allSitesConfig() {
+function rawSitesCatalog() {
   const base = [...SITE_CATALOG];
   const extra = (process.env.ANIMAX_SITES || '').split(',').map(s => s.trim()).filter(Boolean);
   for (const e of extra) {
@@ -361,6 +371,15 @@ function allSitesConfig() {
     base.push({ host, tpl, lang: lang || 'sub', kind: kind || 'anime', extra: true });
   }
   return base;
+}
+
+/* v4.0 (Fase 2) · Dominios RESUELTOS por el watchdog: si un sitio rotó
+   a un dominio nuevo (descubierto por Bing/DDG/semillas), TODO el
+   servidor (búsqueda, episodios, resolución, navigationList,
+   queryFreshDomainList) ya lo ve con el host vigente. */
+let watchdog = null; // se crea en el § 4bis (necesita el cache)
+function allSitesConfig() {
+  return watchdog ? watchdog.resolveSites(rawSitesCatalog()) : rawSitesCatalog();
 }
 
 /* Salud por host: { ok:boolean, ts, ms, fails } — cache 30 min. */
@@ -386,6 +405,7 @@ async function refreshHealth() {
     console.error('[health] vivos:', live.join(', '));
   }
 }
+
 function siteIsUsable(site) {
   const h = siteHealth.get(site.host);
   if (!h) return true;              // sin datos aún → se intenta (y se sondea)
@@ -688,7 +708,9 @@ function anilistMap(m) {
 async function anilistQuery(query, variables) {
   // NOTA: el módulo request() de este servidor es GET-only; para el POST
   // de AniList usamos https directo (con control de errores y timeout).
-  return new Promise((resolve) => {
+  // v4.0 (Fase 1): reintento único con 2,5 s ante 429 (AniList limita a
+  // 90 req/min desde 2024) — en frío la capa v4 dispara ráfagas.
+  const once = () => new Promise((resolve) => {
     const payload = JSON.stringify({ query, variables: variables || {} });
     const req = https.request('https://graphql.anilist.co', {
       method: 'POST',
@@ -702,13 +724,26 @@ async function anilistQuery(query, variables) {
       let b = '';
       res.on('data', c => { if (b.length < 1048576) b += c; });
       res.on('end', () => {
-        try { resolve(JSON.parse(b)); } catch { resolve(null); }
+        let data = null;
+        try { data = JSON.parse(b); } catch { data = null; }
+        // 429 o errores de rate-limit → marca para reintentar
+        if (res.statusCode === 429 || (data && data.errors &&
+            /too many|rate.?limit/i.test(JSON.stringify(data.errors)))) {
+          return resolve({ __retry: true, __status: res.statusCode });
+        }
+        resolve(data);
       });
     });
     req.on('timeout', () => { req.destroy(); resolve(null); });
     req.on('error', () => resolve(null));
     req.end(payload);
   });
+  let data = await once();
+  if (data && data.__retry) {
+    await new Promise(r => setTimeout(r, 2500));
+    data = await once();
+  }
+  return data;
 }
 const ANILIST_FIELDS = `
   title { romaji english native }
@@ -813,7 +848,14 @@ function groupOptions(all, query) {
       if (ea !== eb) return ea - eb;                             // título exacto primero
       const ka = a.kind === 'anime' ? 0 : 1, kb = b.kind === 'anime' ? 0 : 1;
       if (ka !== kb) return ka - kb;                             // anime primero
-      return (LANG_ORDER[a.lang] ?? 3) - (LANG_ORDER[b.lang] ?? 3); // DOBLADO primero
+      const la = (LANG_ORDER[a.lang] ?? 3), lb = (LANG_ORDER[b.lang] ?? 3);
+      if (la !== lb) return la - lb;                             // DOBLADO primero
+      // v4.0 (Fase 3) · RE-PRIORIZACIÓN REAL: a igual título e idioma, la
+      // fuente con MEJOR reputación (feedback ✗/✓ + desempeño de búsqueda)
+      // va antes. La que siempre falla se hunde sola.
+      const pa = feedback.penaltyTotalOf(a.host), pb = feedback.penaltyTotalOf(b.host);
+      if (pa !== pb) return pa - pb;                             // reputación
+      return 0;
     })
     .slice(0, 12)
     .map((g, i) => ({
@@ -895,6 +937,19 @@ async function buildOptions(query) {
       }
     }
   }
+
+  /* v4.0 (Fase 3) · AUTO-REPORTE DE BÚSQUEDA: qué fuentes aportaron
+     resultados en ESTA consulta y cuáles no. Alimenta la reputación
+     (searchHits/searchMisses con decaimiento) — sin esperar a que el
+     usuario reporte nada. Una fuente que nunca encuentra nada se
+     hunde sola en el orden de resultados. */
+  try {
+    const hitHosts = new Set(all.map(h => hostOf(h.url)).filter(Boolean));
+    for (const site of allSitesConfig().filter(siteIsUsable)) {
+      feedback.recordSearchOutcome(site.host, hitHosts.has(site.host));
+    }
+  } catch { /* nunca romper la búsqueda por la telemetría */ }
+
   return { query, options, scanned: all.length };
 }
 
@@ -1418,7 +1473,11 @@ async function resolveStream({ pageUrl, episodeUrl, episode }) {
 
   // Paso 2: escanear la página objetivo.
   const html = await fetchHtml(target);
-  if (!html) return { mirrors: [], best: null, scanned: 0, notes: ['página no accesible: ' + target] };
+  if (!html) {
+    // v4.0 (Fase 3) · AUTO-REPORTE: página inaccesible → fallo de la fuente.
+    try { feedback.recordReport(pageUrl, false, 'página no accesible'); } catch {}
+    return { mirrors: [], best: null, scanned: 0, notes: ['página no accesible: ' + target] };
+  }
   let candidates = extractFromHtml(html, target);
   let scanned = 1;
 
@@ -1519,7 +1578,7 @@ async function resolveStream({ pageUrl, episodeUrl, episode }) {
     episodes = (epResult.episodes || []).slice(0, 1300);
   }
 
-  return {
+  const result = {
     mirrors,
     best: mirrors[0] || null,
     scanned,
@@ -1528,6 +1587,22 @@ async function resolveStream({ pageUrl, episodeUrl, episode }) {
     episodes: episodes.map(e => ({ n: e.n, url: e.url, text: e.text, lang: e.lang || 'sub', synth: !!e.synth })),
     episodeCount: episodes.length
   };
+
+  /* v4.0 (Fase 3) · AUTO-REPORTE DE REPRODUCCIÓN — la señal más valiosa
+     para la re-priorización, y el usuario ni se entera de que subió:
+       · 0 espejos            → ✗ (fuente rota para ESTE título)
+       · algún espejo VALIDADO → ✓ (funciona seguro)
+       · espejos sin validar   → sin señal (ambiguo, no contamina)
+     Solo se ejecuta en cache-miss (TTL.resolve), sin doble conteo. */
+  try {
+    if (mirrors.length === 0) {
+      feedback.recordReport(pageUrl, false, 'auto-resolve-vacio');
+    } else if (mirrors.some(m => m.validated)) {
+      feedback.recordReport(pageUrl, true, 'auto-resolve-ok');
+    }
+  } catch { /* jamás romper la resolución */ }
+
+  return result;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1565,8 +1640,12 @@ async function hotFromMeta(sort, format) {
 }
 /** Tendencias de un sitio vivo: enlaces de obras de su portada. */
 async function trendingFromSite(host, patterns) {
-  const site = allSitesConfig().find(s => s.host === host);
+  // v4.0 (Fase 3) · CORRECCIÓN DE ROTACIÓN: el catálogo puede haber
+  // rotado (pelisplushd.net → pelisplushd.info), así que se busca por
+  // host VIGENTE o por el dominio ORIGINAL desde el que rotó.
+  const site = allSitesConfig().find(s => s.host === host || (s.rotated && s.rotated.from === host));
   if (!site || !siteIsUsable(site)) return [];
+  host = site.host;
   const res = await request('https://' + host + '/', { timeoutMs: 8000, maxBytes: 1024 * 1024 });
   if (!res.ok || !res.body) return [];
   const out = [];
@@ -1640,6 +1719,31 @@ function cacheSet(k, v) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+   16bis. WATCHDOG DE DOMINIOS + ROTACIÓN REAL (v4.0 · Fase 2)
+   ══════════════════════════════════════════════════════════════════
+   Cada 6 h (ANIMAX_WATCHDOG_MIN): sondea la salud de cada sitio y, si
+   un dominio cae dos ciclos seguidos, DESCUBRE el nuevo (historial +
+   Bing + DuckDuckGo + semillas de TLD) y ROTA. La app lo recibe por
+   queryFreshDomainList/navigationList SIN actualizar el APK — la
+   técnica de "actualización real" de Seekee, ahora en AniMax.
+   ══════════════════════════════════════════════════════════════════ */
+const createWatchdog = require('./watchdog');
+watchdog = createWatchdog({
+  request, siteHealth, rawSitesCatalog, DEBUG,
+  // Al rotar se limpia la caché de resultados del dominio viejo para
+  // que la búsqueda use el dominio nuevo desde la siguiente petición.
+  onRotate: (siteId, fromHost) => {
+    let flushed = 0;
+    for (const k of [...cache.keys()]) {
+      if (/^(search:|eps:|res:)/.test(k) || String(k).includes(fromHost)) {
+        cache.delete(k); flushed++;
+      }
+    }
+    console.error(`[watchdog] caché limpiada tras rotar ${siteId} (${flushed} entradas)`);
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════
    16.5 BLOQUEADOR DE ANUNCIOS — EasyList DIGERIDA (v3.0 · Fase 3-C)
    ══════════════════════════════════════════════════════════════════
    Técnica "Seekee": el teléfono NUNCA descarga EasyList (~80.000 reglas
@@ -1651,6 +1755,7 @@ function cacheSet(k, v) {
 
 const EASYLIST_URL = 'https://easylist.to/easylist/easylist.txt';
 const ADBLOCK_MAX_HOSTS = 30000;   // límite de respuesta (~1-2 MB ya digerido)
+const ADBLOCK_MAX_HIDE = 3000;     // v4.0 (Fase 6): límite de reglas cosméticas servidas
 TTL.adblock = 24 * 60 * 60 * 1000; // EasyList "Expires: 4 days" — 24 h sobra
 
 /* Lista mínima empaquetada (fallback si la descarga falla): anunciantes
@@ -1718,6 +1823,55 @@ function digestEasyList(text) {
   return [...found].slice(0, ADBLOCK_MAX_HOSTS);
 }
 
+/* v4.0 (Fase 6) · OCULTACIÓN DE ELEMENTOS (reglas cosméticas) —
+   Técnica equivalente al elemhideemu.js de AdBlock Plus que usa Seekee
+   (¡sin copiar su código GPLv3!): digiere de EasyList las reglas
+   `##selector` (element hiding) y sirve una lista compacta de selectores
+   CSS estándar que la app inyecta en el WebView para que las CAJAS de
+   anuncios desaparezcan del DOM (no basta con bloquear la petición:
+     queda un hueco vacío).
+
+   Formato de salida (EasyList conservado, la app lo parsea con `##` como
+   separador y `,` como separador de dominios):
+     · `##.ad-banner`            → genérica (todos los sitios)
+     · `ejemplo.com##.adbox`     → solo en ese dominio
+
+   Se IGNORAN: excepciones `#@#`, CSS extendido de ABP `#?#`, reglas con
+   dominios de excepción (`~dominio.com`) y selectores con sintaxis
+   propietaria que querySelectorAll NO entiende (`:-abp-`, `:has-text`,
+   `:xpath(`, llaves, backslash…). Límite: ADBLOCK_MAX_HIDE reglas. */
+function digestEasyListCosmetics(text) {
+  const found = new Set();
+  // Sintaxis propietaria ABP/uBO NO soportada por querySelectorAll estándar
+  const RE_BAD_SELECTOR = /:-abp-|:has-text|:contains\(|:matches-|:matches-path\(|:style\(|:upward\(|:nth-ancestor\(|:remove\(|:xpath\(|:react\(|:if\(|:if-not\(|[\\{}]/;
+  const RE_DOMAIN_ONE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i;
+  for (const raw of (text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('!') || line.startsWith('[')) continue; // comentarios/cabeceras
+    if (line.startsWith('@@')) continue;                 // excepciones de bloqueo
+    if (line.includes('#@#') || line.includes('#?#')) continue; // exception/extended CSS
+    const sep = line.indexOf('##');
+    if (sep === -1) continue;                             // no es element hiding
+    const domainsPart = line.slice(0, sep);
+    const selector = line.slice(sep + 2).trim();
+    // SANITIZACIÓN: selector vacío, demasiado largo o con sintaxis no-CSS → fuera
+    if (!selector || selector.length > 200) continue;
+    if (RE_BAD_SELECTOR.test(selector)) continue;
+    let domains = '';
+    if (domainsPart) {
+      const parts = domainsPart.split(',');
+      // dominios de excepción (~dominio.com) → la regla NO es aplicable, fuera
+      if (parts.some(d => d.includes('~'))) continue;
+      // cada dominio debe ser un host simple válido (sin rutas ni opciones)
+      if (!parts.every(d => RE_DOMAIN_ONE.test(d))) continue;
+      domains = parts.map(d => d.toLowerCase()).join(',');
+    }
+    found.add(domains ? domains + '##' + selector : '##' + selector);
+    if (found.size >= ADBLOCK_MAX_HIDE) break;            // límite determinista
+  }
+  return [...found].slice(0, ADBLOCK_MAX_HIDE);
+}
+
 /** Construye (con caché 24 h) la lista de hosts lista para AdBlocker.kt. */
 async function buildAdblockList() {
   const cached = cacheGet('adblock', TTL.adblock);
@@ -1745,6 +1899,63 @@ async function buildAdblockList() {
   const body = hosts.join('\n') + '\n';
   cacheSet('adblock', body);
   console.log(`[animax-server] /api/adblock lista: ${hosts.length} hosts (${source}, ${(body.length / 1024).toFixed(0)} KB)`);
+  return body;
+}
+
+/* v4.0 (Fase 6) · Fallback cosmético empaquetado (~20 selectores genéricos
+   MUY comunes, todos CSS estándar válidos) si la descarga de EasyList falla. */
+const FALLBACK_HIDE_RULES = [
+  '##.adsbygoogle',
+  '##.ad-banner',
+  '##.ad-container',
+  '##.ad-slot',
+  '##.advertisement',
+  '##.ad-wrapper',
+  '##.ad-label',
+  '##.ad-overlay',
+  '##.ad-frame',
+  '##.ad-placement',
+  '##.ad-space',
+  '##.advert',
+  '##.advertise',
+  '##.adsbox',
+  '##.banner-ad',
+  '##.popup-ads',
+  '##.sponsor',
+  '##.sponsored-content',
+  '##.text-ad',
+  '##[class*="adslot"]',
+  '##iframe[src*="doubleclick"]',
+  '##iframe[src*="googlesyndication"]'
+];
+
+/** v4.0 (Fase 6): construye (con caché 24 h) la lista de selectores de
+    ocultación de elementos lista para inyectar en el WebView. */
+async function buildAdblockHideList() {
+  const cached = cacheGet('adblock-hide', TTL.adblock);
+  if (cached) return cached;
+
+  // Misma descarga de EasyList que buildAdblockList (caché aparte por cuerpo)
+  const res = await request(EASYLIST_URL, {
+    timeoutMs: 15000,
+    maxBytes: 8 * 1024 * 1024,
+    headers: { 'Accept': 'text/plain,*/*' }
+  });
+
+  let rules, source;
+  if (res.ok && res.body && res.body.includes('##')) {
+    rules = digestEasyListCosmetics(res.body);
+    source = 'easylist';
+  } else {
+    rules = FALLBACK_HIDE_RULES.slice();
+    source = 'fallback';
+  }
+  // Red de seguridad: nunca una respuesta vacía (siempre hay fallback).
+  if (!rules.length) { rules = FALLBACK_HIDE_RULES.slice(); source = 'fallback'; }
+
+  const body = rules.join('\n') + '\n';
+  cacheSet('adblock-hide', body);
+  console.log(`[animax-server] /api/adblock/hide lista: ${rules.length} selectores (${source}, ${(body.length / 1024).toFixed(0)} KB)`);
   return body;
 }
 
@@ -1801,6 +2012,24 @@ function saveHistory() {
 
 loadHistory();
 
+/* ────────────────────────────────────────────────────────────────────
+   16ter. CAPA v4.0 (Fase 1) — ESPEJO DE LA API DE SEEKEE 1.4.0
+   Monta el contrato completo (47 endpoints) con rutas /api/v1/… y las
+   mismas formas de respuesta (beans Gson del APK). Ver v4-api.js.
+   ──────────────────────────────────────────────────────────────────── */
+const createV4Api = require('./v4-api');
+const feedback = require('./feedback');   // v4.0 (Fase 3): reputación de fuentes + bitácora
+const v4Route = createV4Api({
+  json, readBody, cacheGet, cacheSet, TTL,
+  allSitesConfig, siteHealth, siteIsUsable, hostOf,
+  hotTab, buildOptions, metaSearch, metaMatch,
+  anilistQuery, buildAdblockList, buildAdblockHideList, VERSION, request, // buildAdblockHideList: v4.0 (Fase 6)
+  absolutize, stripTags, RE,
+  normalizeTitle, titleRank, heatFor,
+  watchdog   // v4.0 (Fase 2): estado de fuentes + rotación de dominios
+  // (feedback.js se requiere directo en v4-api.js — Fase 3)
+});
+
 /* ══════════════════════════════════════════════════════════════════
    17. Servidor HTTP + rutas
    ══════════════════════════════════════════════════════════════════ */
@@ -1834,6 +2063,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    /* v4.0 (Fase 1) · Capa espejo de la API de Seekee: /api/v1/* y
+       /api/report/web (feedback de fuentes). Devuelve false si la ruta
+       no es suya → continúa el router clásico de abajo.
+       v4.0 (Fase 21): /apk/* también la gestiona v4-api (descarga del
+       binario de actualización in-app con Content-Length real). */
+    if (path.startsWith('/api/v1/') || path === '/api/report/web' || path.startsWith('/apk/')) {
+      const handled = await v4Route(req, res, path, parsed.searchParams, started);
+      if (handled !== false) return;
+      return json(res, 404, { ok: false, error: 'no-found:' + path });
+    }
+
     if (path === '/api/ping' && req.method === 'GET') {
       return json(res, 200, {
         ok: true, server: 'animax-server', version: VERSION,
@@ -1843,24 +2083,36 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    /* /api/domains → equivalente a queryFreshDomainList de Seekee */
+    /* /api/domains → equivalente a queryFreshDomainList de Seekee
+       v4.0 (Fase 2): ahora con rotación — host VIGENTE, dominio previo,
+       cuándo rotó y con qué fuente se descubrió el nuevo. */
     if (path === '/api/domains' && req.method === 'GET') {
       const sites = allSitesConfig();
+      const wstat = watchdog ? watchdog.status() : null;
+      const stById = new Map((wstat ? wstat.sources : []).map(s => [s.id, s]));
       return json(res, 200, {
         ok: true, version: VERSION,
         domains: sites.map(s => s.host),
-        sites: sites.map(s => ({
-          host: s.host, lang: s.lang, kind: s.kind,
-          alive: siteHealth.has(s.host) ? siteHealth.get(s.host).ok : null,
-          ms: siteHealth.has(s.host) ? siteHealth.get(s.host).ms : null
-        })),
-        note: 'Añade sitios con ANIMAX_SITES="host|plantillaCon{q}|idioma|tipo,..."'
+        sites: sites.map(s => {
+          const ws = stById.get(String(s.host).replace(/^www\./, '').split('.')[0]);
+          return {
+            host: s.host, lang: s.lang, kind: s.kind,
+            alive: siteHealth.has(s.host) ? siteHealth.get(s.host).ok : null,
+            ms: siteHealth.has(s.host) ? siteHealth.get(s.host).ms : null,
+            previousDomain: ws ? ws.previousDomain : null,
+            changedAt: ws ? ws.changedAt : null,
+            discoverySource: ws ? ws.discoverySource : 'catalogo'
+          };
+        }),
+        summary: wstat ? wstat.summary : null,
+        note: 'Rotación real: ANIMAX_WATCHDOG_MIN (defecto 360) · desactivar: ANIMAX_WATCHDOG_OFF=1'
       });
     }
 
     if (path === '/api/search' && req.method === 'GET') {
       const q = (parsed.searchParams.get('q') || '').trim();
       if (!q) return json(res, 400, { ok: false, error: 'falta ?q=' });
+      feedback.recordQuery(q);   // v4.0 (Fase 3): bitácora → relatedQueries/forecast
       const key = 'search:' + q.toLowerCase();
       let result = cacheGet(key, TTL.search);
       if (!result) {
@@ -2022,6 +2274,25 @@ const server = http.createServer(async (req, res) => {
       return res.end(body);
     }
 
+    /* NOVEDAD v4.0 (Fase 6): selectores de OCULTACIÓN de elementos
+       (cosméticos) digeridos de EasyList → la app los inyecta en el
+       WebView para que las cajas de anuncios desaparezcan del DOM.
+       TEXTO PLANO: una regla EasyList por línea (`##selector` o
+       `dominio.com##selector`). */
+    if (path === '/api/adblock/hide' && req.method === 'GET') {
+      const body = await buildAdblockHideList();
+      const lines = body.trim() ? body.trim().split('\n').length : 0;
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400',
+        'X-Blocks': String(lines),
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Api-Key',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+      });
+      return res.end(body);
+    }
+
     if (path === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html><head><meta charset="utf-8"><title>AniMax Server</title>
@@ -2029,6 +2300,21 @@ const server = http.createServer(async (req, res) => {
 h1{color:#ff5a3c}code{background:#1c1c26;padding:2px 6px;border-radius:6px}a{color:#ff8a3c}</style></head><body>
 <h1>AniMax Server ${VERSION}</h1>
 <p>Servidor privado multi-fuente — el teléfono pregunta, este servidor trabaja.</p>
+<p style="color:#ff8a3c"><b>v4.0 · Capa espejo de la API de Seekee 1.4.0</b> — mismas rutas y formas de respuesta (beans) que <code>mobile-api.buscari.com</code>, sin anuncios ni telemetría:</p>
+<ul>
+<li><b>HOME server-driven</b> · <code>GET /api/v1/app/content/home/navigationBar</code> · <code>getSectionContentByPage</code> · <code>getSingle/MultipleAlbumDetail</code> · <code>getGuideImgList</code></li>
+<li><b>Catálogo de sitios</b> · <code>GET /api/v1/app/content/website/navigationList</code> · <code>queryFreshDomainList</code> (dominios vigentes estilo Seekee)</li>
+<li><b>FilmCenter</b> · <code>GET /api/v1/content/filmCenter/homepage</code> · <code>stream/types</code> · <code>stream/films</code> · <code>genres</code> · <code>genres/popular</code> · <code>genres/films</code> · <code>orderTypes</code> · <code>film/subPage</code></li>
+<li><b>Búsqueda v2</b> · <code>POST|GET /api/v1/app/search/search</code> (web+contenido, <code>SearchResultPageData</code> con <b>sourceList</b> agregado por título y prioridad Latino→Castellano→Sub) · <code>GET /api/v1/search/relatedQueries?keyWord=</code> · <code>/api/v1/api/home/search/hot</code> (con <code>heatScore</code>) · <code>screening/list</code> · <code>category/list</code> · <b>🆕</b> <code>GET /api/v1/app/search/forecast?keyWord=</code> (predicción de texto)</li>
+<li><b>Reproductor</b> · <code>GET /api/v1/tv/configuration/subtitles</code> (<code>DomainSubtitlesBean</code>)</li>
+<li><b>Anti-anuncios</b> · <code>GET /api/v1/api/config/getAdBlockRule</code> · <code>v2/getAdBlockDomain</code></li>
+<li><b>Config remota</b> · <code>GET /api/v1/config/javs/querySettings</code> (URL del script sniffer) · <code>GET /api/v1/config/sniffer.js</code> · <code>config/appUpdate/check</code></li>
+<li><b>Recomendados</b> · <code>GET /api/v1/api/content/recommend/list</code></li>
+<li><b>Reportes de fuentes</b> · <code>POST /api/report/web</code> {url, ok, reason} → re-priorización · <code>GET /api/report/web</code> resumen con reputación</li>
+<li><b>🆕 Re-priorización automática (Fase 3)</b> — auto-reportes del propio servidor (resoluciones ✓/✗ y aciertos de búsqueda por fuente) + feedback de la app → el orden de resultados se recalcula solo. <code>GET /api/v1/config/sources/status</code> ahora incluye <code>search</code> y <code>penalty</code> por fuente</li>
+<li><b>🆕 Watchdog de dominios (Fase 2)</b> · <code>GET /api/v1/config/sources/status</code> — salud por sitio, última verificación y rotaciones · <code>POST /api/v1/config/sources/refresh</code> — lanza un ciclo ya · <code>GET /api/domains</code> — dominios VIGENTES + rotación</li>
+</ul>
+<p>Rutas clásicas (compatibilidad AniMax 3.x):</p>
 <ul>
 <li><code>GET /api/ping</code> — estado + sitios vivos</li>
 <li><code>GET /api/search?q=one piece</code> — opciones [Doblado]/[Sub] con metadatos</li>
@@ -2037,8 +2323,9 @@ h1{color:#ff5a3c}code{background:#1c1c26;padding:2px 6px;border-radius:6px}a{col
 <li><code>GET /api/hot?tab=anime|peliculas|series|minidramas</code> — ranking popular 🔺</li>
 <li><code>GET /api/home</code> — las 4 pestañas del ranking en un JSON</li>
 <li><code>GET /api/related?q=…</code> — sugerencias de búsqueda</li>
-<li><code>GET /api/domains</code> — sitios configurados y su salud</li>
+<li><code>GET /api/domains</code> — sitios con su salud y rotación de dominios (Fase 2)</li>
 <li><code>GET /api/adblock</code> — EasyList digerida a hosts (bloqueador del navegador) 🛡️</li>
+<li><code>GET /api/adblock/hide</code> — selectores de ocultación de elementos (cosméticos, Fase 6) 🪄</li>
 <li><code>GET /api/history?deviceId=…</code> — historial de reproducción del dispositivo 🕘</li>
 <li><code>POST /api/history</code> — {deviceId, entries} → merge (gana el timestamp mayor)</li>
 <li><code>DELETE /api/history?deviceId=…</code> — borra el historial del dispositivo</li>
@@ -2059,4 +2346,7 @@ server.listen(PORT, () => {
   // Probador de salud: arranque + cada 25 min (dominios frescos, técnica Seekee).
   refreshHealth().catch(() => {});
   setInterval(() => refreshHealth().catch(() => {}), 25 * 60 * 1000);
+  // v4.0 (Fase 2) · WATCHDOG: sondeo + descubrimiento + rotación de
+  // dominios cada 6 h (ANIMAX_WATCHDOG_MIN para probar más rápido).
+  if (watchdog) watchdog.start();
 });

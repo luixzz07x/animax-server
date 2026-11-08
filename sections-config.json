@@ -1,0 +1,37 @@
+{
+  "$comentario": "v4.0 (Fase 9): configuración del HOME modular server-driven. El servidor lee este archivo y sirve getSectionContentByPage por tab: cada página devuelve TODAS las secciones del tab con su lista (el servidor rellena cada sección con catalogPage usando su sort). sorts válidos: trending | popularity | rating | newest. La sección CONTINUE debe ser siempre la primera de cada tab (la app la OCULTA si singleAlbumList viene vacío).",
+  "tabs": {
+    "comic": [
+      { "id": 1, "name": "Continuar viendo", "style": "CONTINUE", "sort": "trending" },
+      { "id": 2, "name": "Destacado hoy", "style": "BANNER", "sort": "trending" },
+      { "id": 3, "name": "Tendencias", "style": "SINGLE_ALBUM", "sort": "trending" },
+      { "id": 4, "name": "Top 10 anime", "style": "RANK_LIST", "sort": "rating" },
+      { "id": 5, "name": "Series recomendadas", "style": "MULTIPLE_ALBUM", "sort": "popularity" },
+      { "id": 6, "name": "Recién añadidos", "style": "SINGLE_ALBUM", "sort": "newest" }
+    ],
+    "drama": [
+      { "id": 1, "name": "Continuar viendo", "style": "CONTINUE", "sort": "trending" },
+      { "id": 2, "name": "Destacado de la semana", "style": "BANNER", "sort": "trending" },
+      { "id": 3, "name": "Series del momento", "style": "SINGLE_ALBUM", "sort": "trending" },
+      { "id": 4, "name": "Top 10 series", "style": "RANK_LIST", "sort": "rating" },
+      { "id": 5, "name": "No te puedes perder", "style": "MULTIPLE_ALBUM", "sort": "popularity" },
+      { "id": 6, "name": "Estrenos recientes", "style": "SINGLE_ALBUM", "sort": "newest" }
+    ],
+    "movie": [
+      { "id": 1, "name": "Continuar viendo", "style": "CONTINUE", "sort": "trending" },
+      { "id": 2, "name": "En cartelera", "style": "BANNER", "sort": "trending" },
+      { "id": 3, "name": "Películas del momento", "style": "SINGLE_ALBUM", "sort": "trending" },
+      { "id": 4, "name": "Top 10 películas", "style": "RANK_LIST", "sort": "rating" },
+      { "id": 5, "name": "Imprescindibles", "style": "MULTIPLE_ALBUM", "sort": "popularity" },
+      { "id": 6, "name": "Estrenos recientes", "style": "SINGLE_ALBUM", "sort": "newest" }
+    ],
+    "short": [
+      { "id": 1, "name": "Continuar viendo", "style": "CONTINUE", "sort": "trending" },
+      { "id": 2, "name": "Minidramas de moda", "style": "BANNER", "sort": "trending" },
+      { "id": 3, "name": "Populares ahora", "style": "SINGLE_ALBUM", "sort": "trending" },
+      { "id": 4, "name": "Top 10 minidramas", "style": "RANK_LIST", "sort": "rating" },
+      { "id": 5, "name": "Maratones cortos", "style": "MULTIPLE_ALBUM", "sort": "popularity" },
+      { "id": 6, "name": "Recién añadidos", "style": "SINGLE_ALBUM", "sort": "newest" }
+    ]
+  }
+}

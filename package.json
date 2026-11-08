@@ -1,10 +1,11 @@
 {
   "name": "animax-server",
-  "version": "2.0.0",
-  "description": "AniMax Server v2.0 — multi-fuente (anime latino/sub, películas, series, doramas), granja profunda, rankings",
+  "version": "4.0.0",
+  "description": "AniMax Server v4.0 — capa espejo de la API de Seekee 1.4.0 (47 endpoints, beans Gson idénticos) sobre el motor multi-fuente v3: anime latino/sub, películas, series, doramas, granja profunda, rankings, adblock, dominios frescos",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node test-v4-api.js"
   },
   "engines": {
     "node": ">=14"
