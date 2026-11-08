@@ -52,7 +52,7 @@
 
 'use strict';
 
-const VERSION = '4.0.4';  // v4.0 (Fase 4): FilmCenter completo — teatros, géneros, subPage con filtros, fichas + Jikan/TMDB
+const VERSION = '4.1.0';  // v4.1 (FASE D0.5): PÁGINAS PROPIAS UNIFICADAS — hub.js (/hub, /hub/watch) con puente AnimaxHub + window.quan (espejo del javascriptChannel de Seekee)
 const PORT = Number(process.env.PORT || process.env.ANIMAX_PORT || 3001);
 const API_KEY = process.env.ANIMAX_API_KEY || '';   // vacío = abierto (uso personal)
 const PROXY = process.env.ANIMAX_PROXY || '';       // user:pass@host:port
@@ -657,8 +657,19 @@ function episodeLang(seriesTitle, n, urlLang) {
 const DUB_WORDS = /(latino|latina|doblado|doblada|castellano|espa[nñ]ol de espa[nñ]a|audio\s*es|dub)/i;
 const SUB_WORDS = /(sub|subtitulado|subtitulada|subs|raw|sub\s*es)/i;
 
+/* v4.1 (FASE D1) · BLOQUEO DE IDIOMA — marcadores de contenido EN INGLÉS.
+   El usuario NUNCA quiere que la app le ponga un capítulo en otro idioma:
+   si el hit huele a inglés ("english dub", "eng sub", "raw", hosts 100%
+   angloparlantes…) y NO tiene ningún marcador español, se clasifica 'en'
+   y queda EXCLUIDO de las opciones (ver groupOptions). */
+const EN_WORDS = /english|\beng\b|\ben[-_ ]?sub\b|\ben[-_ ]?dub\b|\bdubbed\b|watch\s*(cartoon|anime)?\s*online|\braw\b|\bjap(anh?ese)?\s*audio\b|kissanime|9anime|gogoanime\.io|animepahe|hianime\.to\/\beng|zoro\.to\/\beng/i;
+const ES_WORDS = /espa[nñ]ol|latino|latina|castellano|doblado|doblada|subtitulado|subtitulada|\bsub\s*es\b|vose|audio\s*latino/i;
+
 function classifyLang(text) {
   const t = String(text || '');
+  // v4.1 (FASE D1): inglés detectado SIN ningún marcador español → 'en'
+  // (queda fuera de las opciones: bloqueo de idioma).
+  if (EN_WORDS.test(t) && !ES_WORDS.test(t)) return 'en';
   if (/castellano|espa[nñ]a/i.test(t) && !/latino/i.test(t)) return 'castellano';
   if (/(sub\s*espa[nñ]ol|subtitulado|sub latino|sub)/i.test(t) && !/doblado|latino/i.test(t)) return 'sub';
   if (SUB_WORDS.test(t) && !DUB_WORDS.test(t)) return 'sub';
@@ -822,6 +833,9 @@ function groupOptions(all, query) {
     if (qWords.length && !hit.relaxed && !hit.altFound &&
         !qWords.every(w => titleNorm.includes(w) || normalizeTitle(hit.url).includes(w))) continue;
     const lang = hit.siteLang || classifyLang(hit.title + ' ' + hit.url);
+    // v4.1 (FASE D1) · BLOQUEO DE IDIOMA: las opciones EN INGLÉS jamás
+    // llegan al teléfono — el usuario nunca quiere salir del español.
+    if (lang === 'en') continue;
     const kind = hit.kind || kindOfUrl(hit.url, hit.title, null);
     const key = titleNorm.slice(0, 40) + '|' + lang;
     if (!groups.has(key)) {
@@ -1459,15 +1473,26 @@ async function expandHlsVariants(candidate) {
   return labeled.filter(v => v.url !== candidate.url);
 }
 
-async function resolveStream({ pageUrl, episodeUrl, episode }) {
+async function resolveStream({ pageUrl, episodeUrl, episode, lang }) {
   const notes = [];
   let target = episodeUrl || pageUrl;
+
+  // v4.1 (FASE D1) · Idioma de la opción (latino/castellano/sub) que pide
+  // la app: se propaga a CADA espejo para que el teléfono pueda saltar de
+  // servidor SIN cambiar de idioma (bloqueo de idioma en cascada).
+  const optionLang = (lang === 'latino' || lang === 'castellano' || lang === 'sub') ? lang : null;
+  let episodeLangHint = optionLang || urlLangHint(target || '') || urlLangHint(pageUrl || '');
 
   // Paso 1: episodio pedido sin URL → localizarlo.
   if (episode && !episodeUrl) {
     const list = await buildEpisodes(pageUrl);
     const found = list.episodes.find(e => e.n === episode);
-    if (found) target = found.url;
+    if (found) {
+      target = found.url;
+      // v4.1 (FASE D1): el idioma EXPLÍCITO del episodio (rango de doblaje
+      // real) manda sobre el de la opción.
+      if (found.lang) episodeLangHint = found.lang;
+    }
     else notes.push(`episodio ${episode} no listado (${list.total} encontrados)`);
   }
 
@@ -1565,6 +1590,9 @@ async function resolveStream({ pageUrl, episodeUrl, episode }) {
     server: farmName(c.url),
     quality: c.quality || '',
     validated: c.validated === true,
+    // v4.1 (FASE D1) · idioma del espejo (opción → episodio → URL) para
+    // que la cascada del teléfono salte SIN cambiar de idioma.
+    lang: episodeLangHint || urlLangHint(c.url) || 'sub',
     headers: {
       'User-Agent': userAgentFor(c.url),
       ...(c.referer ? { Referer: c.referer } : {})
@@ -2019,16 +2047,23 @@ loadHistory();
    ──────────────────────────────────────────────────────────────────── */
 const createV4Api = require('./v4-api');
 const feedback = require('./feedback');   // v4.0 (Fase 3): reputación de fuentes + bitácora
-const v4Route = createV4Api({
+const v4Ctx = {
   json, readBody, cacheGet, cacheSet, TTL,
   allSitesConfig, siteHealth, siteIsUsable, hostOf,
   hotTab, buildOptions, metaSearch, metaMatch,
   anilistQuery, buildAdblockList, buildAdblockHideList, VERSION, request, // buildAdblockHideList: v4.0 (Fase 6)
   absolutize, stripTags, RE,
   normalizeTitle, titleRank, heatFor,
-  watchdog   // v4.0 (Fase 2): estado de fuentes + rotación de dominios
+  watchdog,   // v4.0 (Fase 2): estado de fuentes + rotación de dominios
+  buildEpisodes   // v4.1 (FASE D0.5): para las fichas del hub (/hub/watch)
   // (feedback.js se requiere directo en v4-api.js — Fase 3)
-});
+};
+const v4Route = createV4Api(v4Ctx);
+// v4.1 (FASE D0.5) · PÁGINAS PROPIAS UNIFICADAS (hub.js): el mismo ctx
+// compartido — v4-api auto-inyecta ctx.seekeeSearch al crearse, así el
+// hub reutiliza el motor de búsqueda agregado sin duplicar nada.
+const createHub = require('./hub');
+const hubRoute = createHub(v4Ctx);
 
 /* ══════════════════════════════════════════════════════════════════
    17. Servidor HTTP + rutas
@@ -2071,6 +2106,15 @@ const server = http.createServer(async (req, res) => {
     if (path.startsWith('/api/v1/') || path === '/api/report/web' || path.startsWith('/apk/')) {
       const handled = await v4Route(req, res, path, parsed.searchParams, started);
       if (handled !== false) return;
+      return json(res, 404, { ok: false, error: 'no-found:' + path });
+    }
+
+    /* v4.1 (FASE D0.5) · PÁGINAS PROPIAS UNIFICADAS: /hub, /hub/watch y
+       /hub/version las sirve hub.js (HTML propio con puente AnimaxHub +
+       window.quan, espejo del javascriptChannel de Seekee). */
+    if (path === '/hub' || path.startsWith('/hub/')) {
+      const handled = await hubRoute(req, res, path, parsed);
+      if (handled) return;
       return json(res, 404, { ok: false, error: 'no-found:' + path });
     }
 

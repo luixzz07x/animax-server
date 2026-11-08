@@ -314,6 +314,11 @@ module.exports = function createV4Api(ctx) {
     watchdog   // v4.0 (Fase 2) — puede faltar en despliegues antiguos
   } = ctx;
 
+  // FASE D0.5: se expone seekeeSearch en el ctx compartido para las
+  // PÁGINAS PROPIAS del hub (hub.js /hub?q=… reutiliza el motor agregado
+  // sin duplicar nada). Declaración de función → hoisted, vale aquí.
+  ctx.seekeeSearch = seekeeSearch;
+
   TTL.v4 = 30 * 60 * 1000;          // catálogo (home/filmCenter)
   TTL.v4genres = 6 * 60 * 60 * 1000; // géneros: casi estáticos
 
@@ -1276,26 +1281,54 @@ module.exports = function createV4Api(ctx) {
   }
 
   /* ── CATÁLOGO DE SITIOS (navigationList) ────────────────────────── */
-  function navigationList() {
+  /* FASE D0.5: el PRIMER grupo son las PÁGINAS PROPIAS de AniMax (el
+     hub de hub.js) — espejo del grupo de sitios propios con que Seekee
+     abre su home web (NavigationGroup con sus H5). El resto de grupos
+     (catálogo externo) queda detrás, como en el APK. */
+  function navigationList(req) {
     const sites = allSitesConfig();
+    let own = '';
+    try {
+      const h = (req && req.headers) || {};
+      const host = h['x-forwarded-host'] || h.host || 'localhost';
+      const proto = h['x-forwarded-proto'] || (String(host).includes('localhost') ? 'http' : 'https');
+      own = proto + '://' + host + '/hub';
+    } catch { own = '/hub'; }
     const groups = [
+      { title: 'AniMax · Páginas propias', own: true },
       { title: 'Anime Latino', kind: 'anime', lang: 'latino' },
       { title: 'Anime Subtitulado', kind: 'anime', lang: 'sub' },
       { title: 'Películas y Series', kind: null, lang: 'latino' },
       { title: 'Doramas y Minidramas', kind: 'dorama', lang: null }
     ];
-    return groups.map(g => ({
-      title: g.title,
-      pickCover: '',
-      unPickCover: '',
-      sites: sites
-        .filter(s => (g.kind === null ? (s.kind === 'pelicula' || s.kind === 'serie') : s.kind === g.kind))
-        .filter(s => g.lang === null || s.lang === g.lang)
-        .map(s => ({
-          url: 'https://' + s.host,
-          cover: 'https://icons.duckduckgo.com/ip3/' + s.host + '.ico'
-        }))
-    })).filter(g => g.sites.length);
+    return groups.map(g => {
+      if (g.own) {
+        return {
+          title: g.title,
+          pickCover: '',
+          unPickCover: '',
+          selected: true,
+          sites: [
+            { url: own, cover: '', name: 'AniMax Hub', own: true,
+              description: 'Búsqueda + fichas unificadas (páginas propias)' },
+            { url: own + '?q=naruto', cover: '', name: 'Probar búsqueda', own: true,
+              description: 'Ejemplo: resultados unificados de "naruto"' }
+          ]
+        };
+      }
+      return {
+        title: g.title,
+        pickCover: '',
+        unPickCover: '',
+        sites: sites
+          .filter(s => (g.kind === null ? (s.kind === 'pelicula' || s.kind === 'serie') : s.kind === g.kind))
+          .filter(s => g.lang === null || s.lang === g.lang)
+          .map(s => ({
+            url: 'https://' + s.host,
+            cover: 'https://icons.duckduckgo.com/ip3/' + s.host + '.ico'
+          }))
+      };
+    }).filter(g => g.sites.length);
   }
 
   /* Dominios vigentes (WhiteListConfig): freshEnable=true solo si el
@@ -1524,7 +1557,7 @@ module.exports = function createV4Api(ctx) {
 
     /* ════════ CATÁLOGO DE SITIOS (contrato /buscari/app/content/website/*) ════════ */
     if (path === '/api/v1/app/content/website/navigationList' && method === 'GET') {
-      return ok({ ok: true, data: navigationList() });
+      return ok({ ok: true, data: navigationList(req) });
     }
     if (path === '/api/v1/app/content/website/queryFreshDomainList' && method === 'GET') {
       return ok({ ok: true, data: freshDomainList() });

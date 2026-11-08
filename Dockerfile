@@ -1,9 +1,8 @@
-# Dockerfile para Render (con Docker), Fly.io, Railway u Oracle Cloud.
-# El proyecto no tiene dependencias externas (solo módulos nativos de Node),
-# por eso no hace falta "npm install".
+# Si usas Render: NO necesitas este Dockerfile (Render lee package.json).
+# Este archivo es para Fly.io, Railway u Oracle Cloud con Docker instalado.
 FROM node:20-alpine
 WORKDIR /app
-COPY . .
+COPY index.js package.json ./
 ENV PORT=3001
 EXPOSE 3001
 CMD ["node", "index.js"]
