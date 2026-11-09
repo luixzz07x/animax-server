@@ -1,9 +1,8 @@
-# Render / Fly.io / Railway / Oracle con Docker.
-# Copia TODOS los .js y .json (index.js necesita watchdog, v4-api, hub,
-# feedback, enrich...). Antes solo copiaba index.js y package.json.
+# Si usas Render: NO necesitas este Dockerfile (Render lee package.json).
+# Este archivo es para Fly.io, Railway u Oracle Cloud con Docker instalado.
 FROM node:20-alpine
 WORKDIR /app
-COPY *.js *.json ./
+COPY index.js package.json ./
 ENV PORT=3001
 EXPOSE 3001
 CMD ["node", "index.js"]

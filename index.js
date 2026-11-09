@@ -713,7 +713,13 @@ function anilistMap(m) {
     genres: (m.genres || []).slice(0, 4),
     score: Math.round(((m.averageScore || 0) / 10) * 10) / 10,
     synopsis: String(m.description || '').replace(/<[^>]*>/g, '').slice(0, 260),
-    episodes: m.episodes || 0
+    // v6.0 (G10 · QA One Piece): AniList devuelve `episodes: null` en
+    // animes EN EMISIÓN (One Piece = null) y la ficha quedaba con 0
+    // capítulos. Con `nextAiringEpisode` (el PRÓXIMO que se emite) el
+    // total real = próximo − 1: One Piece ≈ 1,122+ y sube solo.
+    episodes: m.episodes ||
+      (m.nextAiringEpisode && m.nextAiringEpisode.episode > 1
+        ? m.nextAiringEpisode.episode - 1 : 0) || 0
   };
 }
 async function anilistQuery(query, variables) {
@@ -767,6 +773,7 @@ const ANILIST_FIELDS = `
   genres
   description(asHtml: false)
   episodes
+  nextAiringEpisode { episode }
 `;
 async function anilistSearch(search) {
   const data = await anilistQuery(
@@ -1756,8 +1763,12 @@ function cacheSet(k, v) {
    técnica de "actualización real" de Seekee, ahora en AniMax.
    ══════════════════════════════════════════════════════════════════ */
 const createWatchdog = require('./watchdog');
+/* v7.0 (H4): dominios propios del Hub del dueño (mtime-cache) — el
+   watchdog los sondea y aplica el failover entre mirrors. */
+const hubDomains = require('./hub-domains');
 watchdog = createWatchdog({
   request, siteHealth, rawSitesCatalog, DEBUG,
+  hubDomains: hubDomains.hubDomainsConfig,   // v7.0 (H4): salud + failover Hub
   // Al rotar se limpia la caché de resultados del dominio viejo para
   // que la búsqueda use el dominio nuevo desde la siguiente petición.
   onRotate: (siteId, fromHost) => {
@@ -1900,6 +1911,73 @@ function digestEasyListCosmetics(text) {
   return [...found].slice(0, ADBLOCK_MAX_HIDE);
 }
 
+/* v6.0 (G4) · REGLAS URL de EasyList (nuevo digeridor) — el segundo
+   pilar del motor ABP-equivalente: las reglas `||dominio^$tipo,tipo`
+   que la digestión a hosts pierde (bloquean UN tipo de recurso, p. ej.
+   solo scripts). Salida compacta, una regla por línea:
+
+     rule:dominio.com|script,image
+
+   La app (AdBlocker.kt) infiere el tipo del recurso por la extensión de
+   la URL (.js→script, .css→stylesheet, .jpg/.png→image…). Tipos con
+   whitelist ABP estándar; se DESCARTAN reglas con opciones complejas
+   (domain=, ~, *), excepciones @@ y las que quedan sin tipo conocido
+   (esas ya están como host). Límite determinista ADBLOCK_MAX_RULES. */
+const ADBLOCK_MAX_RULES = 8000;
+const RE_DOMAIN_HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+const RULE_TYPES_OK = new Set(['script', 'image', 'stylesheet', 'subdocument', 'xmlhttprequest', 'media', 'object', 'other']);
+function digestEasyListRules(text) {
+  const found = new Map();   // host → Set<tipo>
+  // ||dominio^$opciones  (también ||dominio.sub^$opciones)
+  const RE = /^\|\|([a-z0-9][a-z0-9.-]*[a-z0-9])\^(?:\$([a-z0-9,~_=-]+))?$/i;
+  for (const raw of (text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('!') || line.startsWith('[')) continue;
+    if (line.startsWith('@@')) continue;                    // excepciones
+    const m = RE.exec(line);
+    if (!m) continue;
+    const host = m[1].toLowerCase();
+    if (!RE_DOMAIN_HOST.test(host)) continue;
+    const opts = (m[2] || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    // Opciones complejas (domain=, negaciones ~, match-case) → fuera:
+    if (opts.some(o => o.includes('=') || o.startsWith('~'))) continue;
+    const types = opts.filter(o => RULE_TYPES_OK.has(o));
+    // Sin tipos reconocibles: ya está cubierto por la digestión a hosts.
+    if (!types.length) continue;
+    if (!found.has(host)) found.set(host, new Set());
+    for (const t of types) found.get(host).add(t);
+    if (found.size >= ADBLOCK_MAX_RULES) break;             // límite determinista
+  }
+  const out = [];
+  for (const [host, types] of found) out.push('rule:' + host + '|' + [...types].join(','));
+  return out.slice(0, ADBLOCK_MAX_RULES);
+}
+
+/* v6.0 (G3) · Persistencia de la última lista buena en disco (Render
+   free reinicia la instancia y pierde el caché en memoria; el disco
+   efímero al menos sobrevive mientras viva). + FUSIÓN con ad_hosts
+   (11,290 dominios extraídos de Seekee, mismo propósito: bloquear ads). */
+const ADBLOCK_DISK = __dirname + '/data/adblock-cache.json';
+function adblockDiskGet(key) {
+  try { return JSON.parse(fs.readFileSync(ADBLOCK_DISK, 'utf8'))[key] || null; } catch { return null; }
+}
+function adblockDiskSet(key, value) {
+  try {
+    let all = {};
+    try { all = JSON.parse(fs.readFileSync(ADBLOCK_DISK, 'utf8')) || {}; } catch {}
+    all[key] = value; all.savedAt = new Date().toISOString();
+    fs.writeFileSync(ADBLOCK_DISK, JSON.stringify(all));
+  } catch { /* best-effort */ }
+}
+function loadAdHosts() {
+  try {
+    const txt = fs.readFileSync(__dirname + '/data/ad_hosts', 'utf8');
+    return txt.split('\n').map(l => l.trim().toLowerCase())
+      .filter(l => l && !l.startsWith('#') && /^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(l));
+  } catch { return []; }
+}
+const AD_HOSTS_LOCAL = loadAdHosts();
+
 /** Construye (con caché 24 h) la lista de hosts lista para AdBlocker.kt. */
 async function buildAdblockList() {
   const cached = cacheGet('adblock', TTL.adblock);
@@ -1915,11 +1993,16 @@ async function buildAdblockList() {
 
   let hosts, source;
   if (res.ok && res.body && res.body.includes('||')) {
-    hosts = digestEasyList(res.body);
-    source = 'easylist';
+    /* v6.0 (G3): EasyList digerida + FUSIÓN con ad_hosts (Set dedup) */
+    hosts = [...new Set([...digestEasyList(res.body), ...AD_HOSTS_LOCAL])].slice(0, ADBLOCK_MAX_HOSTS);
+    source = 'easylist+ad_hosts(' + AD_HOSTS_LOCAL.length + ')';
+    adblockDiskSet('hosts', hosts.slice(0, 20000));   // última lista buena
   } else {
-    hosts = FALLBACK_ADBLOCK_HOSTS.slice();
-    source = 'fallback';
+    // v6.0 (G3) cadena de fallback: disco → ad_hosts → embebida
+    const disk = adblockDiskGet('hosts');
+    if (disk && disk.length > 100) { hosts = disk; source = 'disk-cache'; }
+    else if (AD_HOSTS_LOCAL.length) { hosts = AD_HOSTS_LOCAL.slice(); source = 'ad_hosts'; }
+    else { hosts = FALLBACK_ADBLOCK_HOSTS.slice(); source = 'fallback'; }
   }
   // Red de seguridad: nunca una respuesta vacía (siempre hay fallback).
   if (!hosts.length) { hosts = FALLBACK_ADBLOCK_HOSTS.slice(); source = 'fallback'; }
@@ -1927,6 +2010,34 @@ async function buildAdblockList() {
   const body = hosts.join('\n') + '\n';
   cacheSet('adblock', body);
   console.log(`[animax-server] /api/adblock lista: ${hosts.length} hosts (${source}, ${(body.length / 1024).toFixed(0)} KB)`);
+  return body;
+}
+
+/* v6.0 (G4) · REGLAS URL para el mini-motor ABP de AdBlocker.kt —
+   TEXTO PLANO con líneas `rule:host|tipo,tipo…`. Cadena con caché 24 h,
+   persistencia en disco (misma estrategia que hosts) y cero respuesta
+   rota: si EasyList no está disponible → lista vacía (los hosts y los
+   selectores cosméticos siguen sirviendo igual). */
+async function buildAdblockRulesList() {
+  const cached = cacheGet('adblock-rules', TTL.adblock);
+  if (cached) return cached;
+
+  let rules = [];
+  const res = await request(EASYLIST_URL, {
+    timeoutMs: 15000,
+    maxBytes: 8 * 1024 * 1024,
+    headers: { 'Accept': 'text/plain,*/*' }
+  });
+  if (res.ok && res.body && res.body.includes('||')) {
+    rules = digestEasyListRules(res.body);
+    if (rules.length) adblockDiskSet('rules', rules);
+  } else {
+    const disk = adblockDiskGet('rules');
+    if (Array.isArray(disk) && disk.length) rules = disk;   // última buena
+  }
+  const body = rules.join('\n') + (rules.length ? '\n' : '');
+  cacheSet('adblock-rules', body);
+  console.log(`[animax-server] /api/adblock/rules: ${rules.length} reglas URL`);
   return body;
 }
 
@@ -1974,9 +2085,11 @@ async function buildAdblockHideList() {
   if (res.ok && res.body && res.body.includes('##')) {
     rules = digestEasyListCosmetics(res.body);
     source = 'easylist';
+    adblockDiskSet('hide', rules.slice(0, 1500));     // v6.0 (G3): última lista buena
   } else {
-    rules = FALLBACK_HIDE_RULES.slice();
-    source = 'fallback';
+    const disk = adblockDiskGet('hide');               // v6.0 (G3): disco primero
+    rules = (disk && disk.length > 5) ? disk : FALLBACK_HIDE_RULES.slice();
+    source = (disk && disk.length > 5) ? 'disk-cache' : 'fallback';
   }
   // Red de seguridad: nunca una respuesta vacía (siempre hay fallback).
   if (!rules.length) { rules = FALLBACK_HIDE_RULES.slice(); source = 'fallback'; }
@@ -2047,6 +2160,10 @@ loadHistory();
    ──────────────────────────────────────────────────────────────────── */
 const createV4Api = require('./v4-api');
 const feedback = require('./feedback');   // v4.0 (Fase 3): reputación de fuentes + bitácora
+/* v6.0 (G2) · PROVEEDORES REALES DE EPISODIOS (allanime/hianime →
+   fallback motor propio). createProviders usa las primitivas del ctx. */
+const { createProviders } = require('./providers');
+const providers = createProviders({ request, cacheGet, cacheSet, TTL });
 const v4Ctx = {
   json, readBody, cacheGet, cacheSet, TTL,
   allSitesConfig, siteHealth, siteIsUsable, hostOf,
@@ -2055,7 +2172,13 @@ const v4Ctx = {
   absolutize, stripTags, RE,
   normalizeTitle, titleRank, heatFor,
   watchdog,   // v4.0 (Fase 2): estado de fuentes + rotación de dominios
-  buildEpisodes   // v4.1 (FASE D0.5): para las fichas del hub (/hub/watch)
+  buildEpisodes, // v4.1 (FASE D0.5): para las fichas del hub (/hub/watch)
+  /* v6.0 (G2) · proveedores reales + resolutores profundos para embeds */
+  providers, resolveStream, deepResolveFarm, quickValidate,
+  /* v7.0 (H2) · GATE HONESTO del Hub: hub.js lee la clave de aquí para
+     decidir si una página propia abre (X-Api-Key / ?key=) o muestra la
+     portada «Abre este contenido dentro de AniMax». */
+  apiKey: API_KEY
   // (feedback.js se requiere directo en v4-api.js — Fase 3)
 };
 const v4Route = createV4Api(v4Ctx);
@@ -2094,7 +2217,15 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') return json(res, 204, {});
   if (API_KEY && (req.headers['x-api-key'] || '') !== API_KEY) {
-    return json(res, 401, { ok: false, error: 'api-key-required' });
+    /* v7.0 (H2) · GATE HONESTO: las páginas propias del Hub NO devuelven
+       401 JSON — hub.js muestra su portada «Abre este contenido dentro
+       de AniMax» (espejo del token= de Loklok, sin engaños). La API JSON
+       sigue cerrada con 401 como siempre. */
+    const hubPage = path === '/hub' || path === '/hub/detail' ||
+      path === '/hub/theater' || path === '/hub/watch' || path === '/hub/version';
+    if (!hubPage) {
+      return json(res, 401, { ok: false, error: 'api-key-required' });
+    }
   }
 
   try {
@@ -2337,6 +2468,28 @@ const server = http.createServer(async (req, res) => {
       return res.end(body);
     }
 
+    /* v6.0 (G4) · REGLAS URL de EasyList para el mini-motor ABP de la
+       app (AdBlocker.kt): texto plano `rule:host|tipo,tipo…`. Tercera
+       pieza del bloqueo: hosts (red) + selectores (cosmético) + reglas
+       por TIPO de recurso (scripts, imágenes…). */
+    if (path === '/api/adblock/rules' && req.method === 'GET') {
+      const body = await buildAdblockRulesList();
+      const lines = body.trim() ? body.trim().split('\n').length : 0;
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400',
+        'X-Blocks': String(lines),
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Api-Key',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+      });
+      return res.end(body);
+    }
+
+    /* NOTA v6.0 (G4): /api/v1/report/adblock vive en v4-api.js — TODO lo
+       que empieza por /api/v1/ lo enruta esa capa (el router clásico no
+       la ve; un 404 saldría antes de llegar aquí). */
+
     if (path === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(`<!doctype html><html><head><meta charset="utf-8"><title>AniMax Server</title>
@@ -2370,6 +2523,8 @@ h1{color:#ff5a3c}code{background:#1c1c26;padding:2px 6px;border-radius:6px}a{col
 <li><code>GET /api/domains</code> — sitios con su salud y rotación de dominios (Fase 2)</li>
 <li><code>GET /api/adblock</code> — EasyList digerida a hosts (bloqueador del navegador) 🛡️</li>
 <li><code>GET /api/adblock/hide</code> — selectores de ocultación de elementos (cosméticos, Fase 6) 🪄</li>
+<li><code>GET /api/adblock/rules</code> — reglas URL por tipo de recurso (motor ABP-equivalente, G4) 🧩</li>
+<li><code>POST /api/v1/report/adblock</code> — stats de bloqueos de la app (diagnóstico del dueño, G4) 📊</li>
 <li><code>GET /api/history?deviceId=…</code> — historial de reproducción del dispositivo 🕘</li>
 <li><code>POST /api/history</code> — {deviceId, entries} → merge (gana el timestamp mayor)</li>
 <li><code>DELETE /api/history?deviceId=…</code> — borra el historial del dispositivo</li>

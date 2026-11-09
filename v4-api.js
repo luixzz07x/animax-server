@@ -28,10 +28,15 @@
    ═════════════════════════════════════════════════════════════════════ */
 
 const feedback = require('./feedback');
+/* v7.0 (H4): dominios propios del Hub del dueño (animax-hub-domains.json,
+   patrón mtime-cache como sections-config). Requerido directo como
+   feedback.js — el mismo módulo lo consume index.js para el watchdog. */
+const hubDomains = require('./hub-domains');
 const { penaltyTotalOf, statsOf } = feedback;
 const enrich = require('./enrich');   // v4.0 (Fase 4): Jikan (MAL) + TMDB opcional
 const fs = require('fs');            // v4.0 (Fase 9): sections-config.json
 const pathMod = require('path');     // v4.0 (Fase 7): sniffer-script.js
+const vm = require('vm');            // v7.0 (H3): sandbox del analizador remoto
 
 /* ── Tipos de recurso (ResourceType del APK) ─────────────────────────
    movie · drama · comic · short (· sport se omite).                      */
@@ -268,7 +273,8 @@ function toTheater(meta, streamCode) {
   };
 }
 
-/** meta → AlbumData (tarjeta del home server-driven). */
+/** meta → AlbumData (tarjeta del home server-driven). v7.0 (H5): cada
+ *  tarjeta lleva `_meta.source` con su origen (anilist|tmdb|jikan|local). */
 function toAlbum(meta, streamCode) {
   const cover = toTheater(meta, streamCode);
   return {
@@ -282,7 +288,8 @@ function toAlbum(meta, streamCode) {
     time: cover.time,
     year: cover.year,
     pg: meta.rated,
-    integrationId: Number(meta.id) || 0
+    integrationId: Number(meta.id) || 0,
+    _meta: { source: meta._src || 'local' }
   };
 }
 
@@ -311,13 +318,24 @@ module.exports = function createV4Api(ctx) {
     hotTab, buildOptions, metaSearch, metaMatch,
     anilistQuery, buildAdblockList, buildAdblockHideList, VERSION, request, absolutize, stripTags, RE, // buildAdblockHideList: v4.0 (Fase 6)
     normalizeTitle, titleRank, heatFor,   // v4.0 (Fase 3): motor de búsqueda v2
-    watchdog   // v4.0 (Fase 2) — puede faltar en despliegues antiguos
+    watchdog,   // v4.0 (Fase 2) — puede faltar en despliegues antiguos
+    /* v6.0 (G2) · proveedores reales + resolutores (pueden faltar en
+       despliegues viejos → guard con ctx.providers &&) */
+    buildEpisodes, providers, resolveStream, deepResolveFarm, quickValidate
   } = ctx;
 
   // FASE D0.5: se expone seekeeSearch en el ctx compartido para las
   // PÁGINAS PROPIAS del hub (hub.js /hub?q=… reutiliza el motor agregado
   // sin duplicar nada). Declaración de función → hoisted, vale aquí.
   ctx.seekeeSearch = seekeeSearch;
+  /* v7.0 (H2) · HUB 2.0: el portal propio (/hub) consume las MISMAS
+     fuentes que la API de la app (filmCenter + AniList) — una sola
+     puerta de datos, cero duplicación. hub.js las llama con guard
+     (NUNCA lanza: si una falla, la sección desaparece). */
+  ctx.hubPortal = {
+    homeSections, streamTypes, theaterPage, popularGenres,
+    genreFilms, filmDetail, screeningList, catalogPage, filmCenterHomepage
+  };
 
   TTL.v4 = 30 * 60 * 1000;          // catálogo (home/filmCenter)
   TTL.v4genres = 6 * 60 * 60 * 1000; // géneros: casi estáticos
@@ -436,11 +454,27 @@ module.exports = function createV4Api(ctx) {
      definiciones fijas de SECTION_DEFS (el home NUNCA se rompe).        */
   const SECTIONS_FILE = pathMod.join(__dirname, 'sections-config.json');
   const SNIFFER_FILE = pathMod.join(__dirname, 'sniffer-script.js');
-  const SECTION_STYLES = ['BANNER', 'CONTINUE', 'SINGLE_ALBUM', 'RANK_LIST', 'MULTIPLE_ALBUM'];
+  /* v7.0 (H3): hermano del sniffer — analizador de páginas remoto. */
+  const ANALYZER_FILE = pathMod.join(__dirname, 'analyzer-script.js');
+  /* v7.0 (H5) · SECCIONES NUEVAS DEL HOME DE PLATAFORMA (server-driven):
+     SEASON_NOW    — «Estrenos de temporada» (AniList GraphQL SeasonNow,
+                     caché en memoria 45 min, SIN API key).
+     TRENDING_NOW  — «Tendencias ahora» (AniList trending fusionado con lo
+                     que ya sirve el catálogo del tab).
+     GENRE_ROW     — «Por género» paramétrica (campo `genre` del JSON).
+     MY_LIST       — «Mi lista» de feed LOCAL (la app la llena con su
+                     BD de favoritos — igual que CONTINUE con el historial).
+     Rankings G8 ya viven como RANK_LIST (siguen intactos). */
+  const SECTION_STYLES = ['BANNER', 'CONTINUE', 'SINGLE_ALBUM', 'RANK_LIST', 'MULTIPLE_ALBUM',
+    'SEASON_NOW', 'TRENDING_NOW', 'GENRE_ROW', 'MY_LIST'];
+  /* Feed LOCAL: el server DECLARA la sección (localFeed:true) y la APP
+     la llena desde su store (historial / MyList) — nunca va por red. */
+  const LOCAL_FEED_STYLES = ['CONTINUE', 'MY_LIST'];
   const CFG_SORTS = ['trending', 'popularity', 'rating', 'newest'];
   let cfgCache = { mtime: 0, data: null };
 
-  /** Config normalizada: { tab: [{id, sectionName, style, sort}] }. */
+  /** Config normalizada: { tab: [{id, sectionName, style, sort, genre,
+      localFeed}] }. H5: acepta `genre` (GENRE_ROW) y marca localFeed. */
   function sectionsConfig() {
     try {
       const st = fs.statSync(SECTIONS_FILE);
@@ -457,7 +491,11 @@ module.exports = function createV4Api(ctx) {
             id: Number(s.id) || (i + 1),
             sectionName: String(s.name),
             style: s.style,
-            sort: CFG_SORTS.includes(s.sort) ? s.sort : 'trending'
+            sort: CFG_SORTS.includes(s.sort) ? s.sort : 'trending',
+            // v7.0 (H5): género paramétrico (GENRE_ROW) + feed local
+            genre: typeof s.genre === 'string' && s.genre.trim()
+              ? s.genre.trim().slice(0, 40) : '',
+            localFeed: LOCAL_FEED_STYLES.includes(s.style) || s.localFeed === true
           }));
         if (defs.length) clean[code] = defs;
       }
@@ -468,25 +506,138 @@ module.exports = function createV4Api(ctx) {
       /* Fallback: equivalentes fijos a la config por defecto. */
       const fb = {};
       for (const [code, defs] of Object.entries(SECTION_DEFS)) {
-        fb[code] = defs.map((d, i) => ({ id: i + 1, sectionName: d.sectionName, style: 'SINGLE_ALBUM', sort: SORT_TO_ORDER[d.sort] || 'trending' }));
+        fb[code] = defs.map((d, i) => ({ id: i + 1, sectionName: d.sectionName, style: 'SINGLE_ALBUM', sort: SORT_TO_ORDER[d.sort] || 'trending', genre: '', localFeed: false }));
       }
       return fb;
     }
   }
 
   /** Elementos de una sección (catálogo por orderType). Lista vacía NO se
-      cachea (la CONTINUE vacía se oculta en la app). */
+      cachea (la CONTINUE vacía se oculta en la app). v7.0 (H5): cada
+      tarjeta lleva `_meta.source` (anilist|tmdb|jikan|local). */
   async function sectionItems(code, def, page, size) {
     const key = 'v4:sec2:' + code + ':' + def.id + ':' + def.sort + ':' + page + ':' + size
       + (enrich.tmdbEnabled() ? ':tmdb' : '');
     let items = cacheGet(key, TTL.v4);
     if (!items) {
       const r = await catalogPage({ code, page, pageSize: size, orderType: def.sort });
-      items = r.list.map(m => toAlbum(m, code));
+      items = r.list.map(m => toAlbum(withSource(m, r.source), code));
       if (!items.length) return items;
       cacheSet(key, items);
     }
     return items;
+  }
+
+  /* ── v7.0 (H5) · ESTRENOS DE TEMPORADA + TENDENCIAS (AniList) ─────
+     Consulta pública graphql.anilist.co (SeasonNow) con CACHÉ EN MEMORIA
+     de 45 min y SIN API key (regla 2 del plan). NUNCA lanza: fallo → []
+     honesto y la sección se omite del home (fallback honesto del plan). */
+  const SEASON_TTL = 45 * 60 * 1000;   // 45 min (plan H5: 30–60 min)
+  let seasonCache = { t: 0, list: null };
+
+  function anilistSeasonOf(d) {
+    const m = d.getUTCMonth();
+    return m < 3 ? 'WINTER' : m < 6 ? 'SPRING' : m < 9 ? 'SUMMER' : 'FALL';
+  }
+
+  /** AniList SeasonNow → metas con `_src:"anilist"` (caché 45 min). */
+  async function alSeasonNow() {
+    if (seasonCache.list && Date.now() - seasonCache.t < SEASON_TTL) {
+      return seasonCache.list;
+    }
+    try {
+      const y = new Date().getUTCFullYear();
+      const q = 'query ($s: MediaSeason, $y: Int) { Page(perPage: 24) { ' +
+        'media(type: ANIME, season: $s, seasonYear: $y, isAdult: false, ' +
+        'sort: POPULARITY_DESC) { ' + AL_FIELDS + ' } } }';
+      const data = await anilistQuery(q, { s: anilistSeasonOf(new Date()), y });
+      const raw = (data && data.data && data.data.Page && data.data.Page.media) || [];
+      const list = raw.map(alMap).filter(Boolean).map(m => ({ ...m, _src: 'anilist' }));
+      if (list.length) seasonCache = { t: Date.now(), list };   // fallo → sin caché negativa larga
+      return list;
+    } catch (e) {
+      return seasonCache.list || [];   // fuente caída → lo último bueno o []
+    }
+  }
+
+  /** Estampa la fuente de origen en el metadato (para `_meta` de tarjeta). */
+  function withSource(meta, source) {
+    return { ...meta, _src: meta._src || source || 'anilist' };
+  }
+
+  /** Enriquecimiento JIKAN opcional (sin keys, caché propio de enrich.js):
+      sinopsis larga para las primeras N tarjetas. Best-effort con carrera
+      contra timeout: si Jikan no responde, la tarjeta queda igual (fuente
+      anilist) — NUNCA lanza ni cuelga el home. */
+  async function enrichWithJikan(list, max) {
+    try {
+      const top = (list || []).slice(0, max || 3);
+      await Promise.all(top.map(async (m) => {
+        try {
+          const j = await Promise.race([
+            enrich.jikanByTitle(m.title),
+            new Promise(r => setTimeout(() => r(null), 6000))
+          ]);
+          if (j) {
+            if (j.synopsis && String(j.synopsis).length > String(m.synopsis || '').length) {
+              m.synopsis = String(j.synopsis).slice(0, 300);
+            }
+            m._src = 'jikan';   // la tarjeta fue enriquecida por MAL
+          }
+        } catch (e) { /* Jikan caído → tarjeta anilist normal */ }
+      }));
+    } catch (e) { /* best-effort jamás lanza */ }
+    return list || [];
+  }
+
+  /** Elementos de las secciones NUEVAS H5 → { items, meta } — NUNCA lanza.
+      `meta` describe la fuente para el `_meta` de la sección. */
+  async function h5SectionItems(code, def, page, size) {
+    const fallback = { items: [], meta: { source: 'local', note: 'fuente no disponible' } };
+    try {
+      if (def.style === 'SEASON_NOW') {
+        if (page > 1) return fallback;          // la temporada es de una página
+        const list = await alSeasonNow();
+        await enrichWithJikan(list, 3);         // opcional, sin keys, con fallback
+        return {
+          items: list.slice(0, size).map(m => toAlbum(m, code)),
+          meta: { source: 'anilist', note: 'AniList ' + anilistSeasonOf(new Date()) + ' ' + new Date().getUTCFullYear() }
+        };
+      }
+      if (def.style === 'TRENDING_NOW') {
+        if (page > 1) return fallback;
+        // AniList trending FUSIONADO con lo que ya sirve el tab (plan H5):
+        const [cur, al] = await Promise.all([
+          catalogPage({ code, page: 1, pageSize: size, orderType: 'trending' }).catch(() => ({ list: [], source: 'local' })),
+          alPage({ page: 1, perPage: size, sort: 'TRENDING_DESC' }).catch(() => ({ list: [] }))
+        ]);
+        const seen = new Set();
+        const merged = [];
+        for (const m of [...cur.list.map(x => ({ ...x, _src: cur.source || 'anilist' })),
+                         ...al.list.map(x => ({ ...x, _src: 'anilist' }))]) {
+          const k = normalizeTitleV2(m.title);
+          if (!k || seen.has(k)) continue;
+          seen.add(k);
+          merged.push(m);
+          if (merged.length >= size) break;
+        }
+        return { items: merged.map(m => toAlbum(m, code)), meta: { source: 'anilist+catalogo' } };
+      }
+      if (def.style === 'GENRE_ROW') {
+        // Paramétrica por género (campo `genre` del JSON del dueño):
+        const r = await catalogPage({
+          code, page, pageSize: size, orderType: def.sort,
+          genre: def.genre || null
+        });
+        return {
+          items: r.list.map(m => toAlbum(withSource(m, r.source), code)),
+          meta: { source: r.source || 'anilist', genre: def.genre || '' }
+        };
+      }
+    } catch (e) {
+      return fallback;   // NUNCA lanza: sección omitida por el builder
+    }
+    return null;         // estilo no-H5 → el builder usa sectionItems
   }
 
   async function homeSections(labelCode, page, pageSize) {
@@ -496,23 +647,56 @@ module.exports = function createV4Api(ctx) {
     const size = Math.min(Math.max(pageSize || 20, 6), 30);
     /* v4.0 (Fase 23): las secciones se calculan EN PARALELO — en frío el
        home pasaba de 12 s (6 secciones × AniList en serie) a ~2 s. La
-       lista vacía (CONTINUE) se resuelve sin ir a la red. */
-    const listas = await Promise.all(defs.map(def =>
-      def.style === 'CONTINUE' ? Promise.resolve([]) : sectionItems(code, def, page, size)
-        .catch(() => [])
-    ));
-    const content = defs.map((def, i) => {
-      const items = listas[i];
-      return {
+       lista vacía (CONTINUE) se resuelve sin ir a la red.
+       v7.0 (H5): las secciones NUEVAS pasan por h5SectionItems (AniList
+       temporada/tendencias, género paramétrico, feeds locales) y las de
+       fuente externa que quedan VACÍAS se OMITEN — fallback honesto del
+       plan (la sección desaparece, jamás un error en pantalla). */
+    const listas = await Promise.all(defs.map(def => {
+      if (def.localFeed) {
+        return Promise.resolve({ items: [], meta: { source: 'local', localFeed: true } });
+      }
+      return h5SectionItems(code, def, page, size).then(async res =>
+        res || {
+          /* H5 · CORREGIDO: `await` — sin él `items` era una PROMESA
+             (sin .length) y el builder omitía TODAS las secciones
+             clásicas (RANK_LIST/SINGLE_ALBUM/BANNER/MULTIPLE_ALBUM).
+             El fallo lo cacha el .catch de abajo → omisión honesta. */
+          items: def.style === 'CONTINUE' ? [] : await sectionItems(code, def, page, size),
+          meta: { source: 'catalogo' }
+        })
+        .catch(() => ({ items: [], meta: { source: 'local', note: 'fuente no disponible' } }));
+    }));
+    const content = [];
+    defs.forEach((def, i) => {
+      const { items, meta } = listas[i] || { items: [], meta: {} };
+      const local = def.localFeed === true || LOCAL_FEED_STYLES.includes(def.style);
+      /* H5 · fallback honesto: sección de fuente externa vacía → omitida. */
+      if (!items.length && !local) return;
+      content.push({
         sectionId: def.id,
         sectionName: def.sectionName,
         sectionStyle: def.style,
+        // v7.0 (H5): feed LOCAL declarado (la app lo llena de su store:
+        // CONTINUE → historial, MY_LIST → favoritos). Campo ADITIVO: los
+        // clientes viejos lo ignoran y siguen pintando la lista vacía.
+        localFeed: local,
         singleAlbumList: def.style === 'MULTIPLE_ALBUM' ? [] : items,
         multipleAlbumList: def.style === 'MULTIPLE_ALBUM' ? items : [],
+        /* v6.0 (G8) · paridad SearchLeaderBoard (FORENSE-G8): cada entrada
+           del ranking lleva viewCount — calor determinista por día del
+           título en esa posición (heatFor ya usado por search/hot). La app
+           lo pinta «🔥 12.3K» y distingue el top-3. */
         rankList: def.style === 'RANK_LIST'
-          ? items.slice(0, 10).map((album, idx) => ({ rank: idx + 1, album }))
-          : []
-      };
+          ? items.slice(0, 10).map((album, idx) => ({
+              rank: idx + 1,
+              album,
+              viewCount: heatFor(album.title || `#${idx + 1}`, idx)
+            }))
+          : [],
+        // v7.0 (H5): `_meta` de la SECCIÓN (fuente + nota) — aditivo.
+        _meta: { source: meta.source || 'local', ...(meta.note ? { note: meta.note } : {}), ...(meta.genre ? { genre: meta.genre } : {}) }
+      });
     });
     return {
       content,
@@ -520,7 +704,14 @@ module.exports = function createV4Api(ctx) {
       page,
       pageSize: pageSize || 20,
       totalElements: content.reduce(
-        (n, s) => n + s.singleAlbumList.length + s.multipleAlbumList.length, 0)
+        (n, s) => n + s.singleAlbumList.length + s.multipleAlbumList.length, 0),
+      // v7.0 (H5): metadatos del home (fuente de config + cuenta).
+      _meta: {
+        config: 'sections-config.json',
+        secciones: content.length,
+        feedsLocales: content.filter(s => s.localFeed).map(s => s.sectionStyle),
+        temporada: anilistSeasonOf(new Date()) + ' ' + new Date().getUTCFullYear()
+      }
     };
   }
 
@@ -904,16 +1095,163 @@ module.exports = function createV4Api(ctx) {
      por REPUTACIÓN (feedback ✗/✓ + desempeño de búsqueda). */
   const LANG_PRIORITY = { latino: 0, castellano: 1, sub: 2 };
 
+  /* ── v7.0 (H5) · NORMALIZACIÓN DE TÍTULOS REFORZADA ────────────────
+     Sobre la base (normalizeTitle del ctx) añade: ARTÍCULOS iniciales
+     (the/la/el/los/las/un/una…), AÑOS «(2024)» en cualquier posición,
+     sufijos de idioma «(Sub)/(Lat)/(Dub)/(Cast)», ACENTOS (NFD),
+     mayúsculas y PUNTUACIÓN suelta. Solo para la BÚSQUEDA v2 y el home
+     H5 (el motor viejo conserva su normalizeTitle — cero regresión). */
+  const H5_ARTICLE_RE = /^(the|a|an|la|el|los|las|un|una|unos|unas)\s+/;
+  const H5_LANG_TAG_RE = /\((sub|subs|subtitulado|subtitulos|lat|latino|latam|dub|doblado|doblaje|cast|castellano|espanol)\)/g;
+
+  function normalizeTitleV2(t) {
+    let s = String(t || '').toLowerCase();
+    try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch { /* entornos sin normalize */ }
+    s = s.replace(/[|·—–]\s*.*$/, ' ')          // cola «X | ver online»
+      .replace(/\((\d{4})\)/g, ' ')              // años (2024)
+      .replace(H5_LANG_TAG_RE, ' ')              // (Sub)/(Lat)/(Dub)/(Cast)
+      .replace(RE.EP_NUM, ' ')                   // «capitulo 12», «ep 3»…
+      /* ruido de webs SOLO como PALABRAS COMPLETAS y de prefijo: el
+         «ver» de «Black Clover» y el «online» de «Sword Art Online» son
+         parte del título real y JAMÁS se recortan (QA dura H5, casos
+         13 y 27). Los prefijos de página «Ver X…» sí se quitan. */
+      .replace(/\b(ver|descargar|watch|mira|mirar)\s+/gi, ' ')
+      .replace(/[^\w\s]/g, ' ')                  // puntuación suelta
+      .replace(/\s+/g, ' ').trim();
+    // artículos iniciales (una pasada: «the one piece» → «one piece»)
+    let prev = null;
+    while (prev !== s) { prev = s; s = s.replace(H5_ARTICLE_RE, ''); }
+    return s.trim();
+  }
+
+  /** Ranking v2: EXACTO (0) > empieza-por (1) > contiene (2) > nada (3).
+      Espejo extendido de titleRank (index.js) — mismo espíritu, más casos. */
+  function titleRankV2(tNorm, qNorm) {
+    if (!tNorm || !qNorm) return 3;
+    if (tNorm === qNorm) return 0;
+    if (tNorm.startsWith(qNorm) || qNorm.startsWith(tNorm)) return 1;
+    if (tNorm.includes(qNorm) || qNorm.includes(tNorm)) return 2;
+    return 3;
+  }
+
+  /* ── v7.0 (H5) · TARJETA DE PÁGINA PROPIA DEL HUB AL FRENTE ────────
+     Cuando el título consultado existe en el catálogo, la búsqueda lleva
+     PRIMERO una tarjeta de la página PROPIA del Hub — el «clear play» de
+     Seekee/Loklok en limpio: clearFlag:true + watchFlag:true +
+     siteName:"AniMax Hub" + url → /hub/detail?t=… (el formato real de
+     hub.js para catálogo). Se construye AQUÍ (título/portada/idiomas) y
+     el ROUTE le llena la URL POR PETICIÓN con el host que pide, igual
+     que fillHubUrls — y `hub=0` la apaga honestamente. */
+  function buildHubCard(meta, query) {
+    const langs = Object.keys(LANG_PRIORITY).sort((a, b) => LANG_PRIORITY[a] - LANG_PRIORITY[b])
+      .filter(l => l !== 'castellano');   // catálogo: latino + sub (mejor idioma primero)
+    return {
+      title: meta.title,
+      url: '',                          // ← por petición (hubFrontCard)
+      cover: meta.image || '',
+      description: meta.synopsis || '',
+      icon: '',
+      siteName: 'AniMax Hub',
+      type: 'hub',
+      resourceId: 0,
+      integrationId: 0,
+      score: meta.score || null,
+      startYear: meta.year || null,
+      endYear: null,
+      episodeList: [],
+      categoryList: [meta.type || 'TV Serie'],
+      labelList: langs.map(l => langLabel(l)),
+      websiteLabelList: langs.map(l => langLabel(l)),
+      websiteId: 0,
+      hubUrl: '',                       // ← por petición (hubFrontCard)
+      sourceList: [],
+      watchFlag: true,
+      clearFlag: true,
+      tailCollectList: [],
+      _meta: { source: 'local', page: 'hub-detail', langs, query: String(query || '').slice(0, 80) }
+    };
+  }
+
+  /** Rellena la tarjeta del Hub con el host que pide y la pone AL FRENTE.
+      NO muta el caché (copia) y NUNCA lanza. `on=false` (hub=0) → la
+      omite; sin host → la omite (honesto: sin URL no hay tarjeta). */
+  function hubFrontCard(data, req, on) {
+    try {
+      const out = { ...data, content: Array.isArray(data.content) ? data.content.slice() : [] };
+      delete out._hubCard;                       // campo interno, jamás viaja
+      const sk = data && data._hubCard;
+      if (on && sk && sk.title) {
+        const origin = hubOrigin(req);
+        if (origin) {
+          const u = origin + '/hub/detail?t=' + encodeURIComponent(sk.title);
+          out.content = [{ ...sk, url: u, hubUrl: u, watchFlag: true, clearFlag: true }, ...out.content];
+        }
+      }
+      return out;
+    } catch (e) {
+      return data;   // jamás romper la búsqueda
+    }
+  }
+
   function langLabel(lang) { return LANG_META[lang] || LANG_META.sub; }
 
+  /* ── v7.0 (H2) · HUBURL DEL «CLEAR PLAY» PROPIO ────────────────────
+     El server llena `hubUrl` de cada tarjeta de búsqueda con su página
+     propia (/hub/detail): para catálogo (ficha por filmId/título) y para
+     web (ficha externa ?u= con TODAS las fuentes en src=). Se llena POR
+     PETICIÓN — el caché guarda '' porque la URL depende del host que
+     pide (localhost, dominio del dueño, mirror…). Al existir página
+     propia real, watchFlag + clearFlag pasan a true (honestidad: el
+     «clear play» de verdad existe — espejo SearchResultData de Loklok). */
+  function hubOrigin(req) {
+    try {
+      const host = (req && (req.headers['x-forwarded-host'] || req.headers.host)) || '';
+      const proto = String((req && req.headers['x-forwarded-proto']) || 'http').split(',')[0].trim();
+      if (!host) return '';
+      return proto + '://' + host;
+    } catch { return ''; }
+  }
+
+  /* b64url idéntico al codec (u/n/l/g) de hub.js (encodeSources). */
+  function encodeSourcesB64(list) {
+    try {
+      return Buffer.from(JSON.stringify((list || []).slice(0, 12).map(s => ({
+        u: s.url, n: s.siteName, l: s.label,
+        g: ['latino', 'castellano', 'sub'].includes(s.lang) ? s.lang : 'sub'
+      }))), 'utf8').toString('base64')
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    } catch { return ''; }
+  }
+
+  function fillHubUrls(data, req) {
+    try {
+      if (!data || !Array.isArray(data.content)) return;
+      const origin = hubOrigin(req);
+      if (!origin) return;
+      for (const c of data.content) {
+        if (!c || c.hubUrl) continue;
+        if (c.type === 'filmCenter' && c.title) {
+          c.hubUrl = origin + '/hub/detail?t=' + encodeURIComponent(c.title);
+        } else if (c.type === 'web' && c.title && c.url && /^https?:/i.test(c.url)) {
+          const b64 = encodeSourcesB64(c.sourceList || []);
+          c.hubUrl = origin + '/hub/detail?u=' + encodeURIComponent(c.url) +
+            '&t=' + encodeURIComponent(c.title) + (b64 ? '&src=' + b64 : '');
+        }
+        if (c.hubUrl) { c.watchFlag = true; c.clearFlag = true; }
+      }
+    } catch { /* nunca lanza */ }
+  }
+
   /** Agrupa las opciones web por TÍTULO normalizado → tarjetas con
-   *  TODAS sus fuentes (sourceList) ordenadas idioma+reputación. */
+   *  TODAS sus fuentes (sourceList) ordenadas idioma+reputación.
+   *  v7.0 (H5): normalización REFORZADA (normalizeTitleV2) y ranking
+   *  exacto>empieza>contiene con desempate por idioma latino→castellano→sub. */
   function aggregateByTitle(options, query) {
-    const qNorm = normalizeTitle(query);
+    const qNorm = normalizeTitleV2(query);
     const cards = new Map();   // títuloNormalizado → card
     for (const o of options) {
       if (!o.pageUrl) continue;
-      const tNorm = normalizeTitle(o.title);
+      const tNorm = normalizeTitleV2(o.title);
       if (!tNorm) continue;
       let card = cards.get(tNorm);
       if (!card) {
@@ -923,7 +1261,7 @@ module.exports = function createV4Api(ctx) {
           hitTitle: o.title,
           sources: [],
           meta: o.meta || null,
-          rank: titleRank(normalizeTitle(o.title), qNorm)
+          rank: titleRankV2(normalizeTitleV2(o.title), qNorm)
         };
         cards.set(tNorm, card);
       }
@@ -983,10 +1321,10 @@ module.exports = function createV4Api(ctx) {
     const content = [];
     // 1) Tarjetas de catálogo (type: filmCenter).
     if (page === 1) {
-      const cardTitles = new Set(cards.map(c => c.tNorm));
+      const cardTitles = new Set(cards.map(c => c.tNorm));   // claves V2 (H5)
       for (const m of metas.slice(0, 4)) {
         // no duplicar: si ya hay tarjeta web del mismo título, gana la web
-        if (cardTitles.has(normalizeTitle(m.title))) continue;
+        if (cardTitles.has(normalizeTitleV2(m.title))) continue;
         content.push({
           title: m.title,
           url: '',
@@ -1002,9 +1340,17 @@ module.exports = function createV4Api(ctx) {
           endYear: null,
           episodeList: [],
           categoryList: [m.type || 'TV Serie'],
-          labelList: [LANG_META.latino],
-          websiteLabelList: [],
+          // G6 · "Navegador Seekee": idiomas QUE EL CATÁLOGO BUSCA de
+          // verdad para este tipo (latino + sub) — la ficha ofrece ambos
+          // y los chips del resultado lo reflejan (como los badges
+          // SUB/LATINO de los resultados de Seekee).
+          labelList: [LANG_META.latino, LANG_META.sub],
+          websiteLabelList: [LANG_META.latino, LANG_META.sub],
           websiteId: 0,
+          /* v7.0 (H1) · `hubUrl`: URL de la página PROPIA del Hub para este
+             título (el «clear play» de Seekee). Vacío hasta H2 — el campo
+             ya viaja para que la app lo consuma sin cambio de contrato. */
+          hubUrl: '',
           sourceList: [],
           watchFlag: false,
           clearFlag: false,
@@ -1037,6 +1383,7 @@ module.exports = function createV4Api(ctx) {
         // de ESTE título, en orden de prioridad (Latino primero).
         websiteLabelList: card.langs.map(l => langLabel(l)),
         websiteId: 0,
+        hubUrl: '',   // v7.0 (H1): contrato — H2 llena con la página del Hub
         // NOVEDAD Fase 3 · sourceList: todas las fuentes de este título,
         // ordenadas idioma+reputación. La app las ofrece como "redes" y
         // manda el feedback ✗/✓ por URL (re-priorización automática).
@@ -1080,6 +1427,7 @@ module.exports = function createV4Api(ctx) {
           websiteId: 0,
           sourceList: [{ url: w.url, siteName: w.host, lang: 'sub', label: LANG_META.sub, penalty: 0 }],
           sourceCount: 1,
+          hubUrl: '',
           watchFlag: false, clearFlag: false, tailCollectList: []
         });
       }
@@ -1101,9 +1449,29 @@ module.exports = function createV4Api(ctx) {
           labelList: [LANG_META.sub], websiteLabelList: [], websiteId: 0,
           sourceList: [{ url: busq, siteName: 'google.com', lang: 'sub', label: LANG_META.sub, penalty: 0 }],
           sourceCount: 1,
+          hubUrl: '',
           watchFlag: false, clearFlag: false, tailCollectList: []
         });
       }
+    }
+
+    /* v7.0 (H5) · «SIEMPRE ENCUENTRA»: si el título consultado existe en
+       el catálogo, el ROUTE pone AL FRENTE la tarjeta de la página propia
+       del Hub (clearFlag + siteName "AniMax Hub"). Aquí se elige la MEJOR
+       coincidencia del catálogo con la normalización reforzada (exacto >
+       empieza > contiene) y viaja como campo interno `_hubCard`; el route
+       le llena la URL con el host que pide y `hub=0` la desactiva. */
+    let hubSkeleton = null;
+    if (page === 1 && metas.length) {
+      try {
+        const qN = normalizeTitleV2(keyWord);
+        let best = null;
+        for (const m of metas.slice(0, 4)) {
+          const r = titleRankV2(normalizeTitleV2(m.title), qN);
+          if (!best || r < best.rank) best = { m, rank: r };
+        }
+        if (best && best.rank <= 2) hubSkeleton = buildHubCard(best.m, keyWord);
+      } catch (e) { hubSkeleton = null; }   // jamás romper la búsqueda
     }
 
     return {
@@ -1114,7 +1482,9 @@ module.exports = function createV4Api(ctx) {
       pageSize,
       totalElements: content.length,
       // estadísticas del motor (Fase 3): fuentes y títulos encontrados
-      _engine: { options: options.length, cards: totalWeb, metas: metas.length }
+      _engine: { options: options.length, cards: totalWeb, metas: metas.length },
+      // v7.0 (H5): esqueleto de la tarjeta del Hub (el route la materializa)
+      _hubCard: hubSkeleton
     };
   }
 
@@ -1163,15 +1533,35 @@ module.exports = function createV4Api(ctx) {
     };
   }
 
-  /* relatedQueries v2 (Fase 3): tres capas de sugerencias mientras
-     escribes — 1) títulos de catálogo (AniList) con sus alternativos
-     (romaji/sinónimos: "rent a girlfriend" → "kanojo okarishimasu"),
-     2) lo que TÚ y tu app habéis buscado (bitácora con calor),
-     3) tendencias del día. Máx 10, sin duplicados. */
+  /* relatedQueries v3 (G6 · "Navegador Seekee"): sugerencias EN ESPAÑOL
+     — paridad con el buscador del navegador de Seekee, donde al teclear
+     salen opciones relacionadas en español y luego los resultados con
+     SUB/LATINO. Capas:
+     0) Plantillas ES reales de búsqueda de anime ("X sub español",
+        "ver X online", "X latino", "X castellano", capítulos…).
+     1) Títulos del catálogo (AniList) — autocompletado; los sinónimos
+        solo entran si COMPARTEN alguna palabra con la consulta (así el
+        sinónimo italiano "All'arrembaggio!" no aparece para "one piece",
+        pero "One Piece: La Película" sí).
+     2) Bitácora de la propia app (lo que TÚ buscaste, con calor).
+     3) Tendencias del día.
+     Orden: 1 palabra → títulos primero (autocompletar); 2+ palabras →
+     plantillas ES primero (refinar como en Seekee). Máx 10, sin duplicados. */
+  const ES_TEMPLATES = [
+    (k) => k + ' sub español',
+    (k) => 'ver ' + k,
+    (k) => k + ' latino',
+    (k) => 'ver ' + k + ' online',
+    (k) => k + ' online',
+    (k) => k + ' castellano',
+    (k) => k + ' todos los capítulos',
+    (k) => k + ' película'
+  ];
   async function relatedQueries(keyWord) {
     const kw = String(keyWord || '').trim();
+    if (!kw) return [];
     const out = [];
-    const seen = new Set();
+    const seen = new Set([kw.toLowerCase()]);
     const push = (t) => {
       const s = String(t || '').trim();
       if (!s || s.length < 2 || s.length > 90) return;
@@ -1180,22 +1570,53 @@ module.exports = function createV4Api(ctx) {
       // no se ofrecen como consulta.
       if (/[^\u0000-\u024F\u2000-\u206F\u3000-\u303F!¡¿?'"():;.,\-–—…·&%$#@\s\/+*]/.test(s)) return;
       const k = s.toLowerCase();
-      if (k === kw.toLowerCase()) return;
       if (seen.has(k)) return;
       seen.add(k);
       out.push(s);
     };
+    // Palabras normalizadas de la consulta (para filtrar sinónimos ajenos).
+    const kwWords = kw.toLowerCase().split(/[\s:·,.'"()\-–—]+/)
+      .map(w => w.trim()).filter(w => w.length >= 3);
+    const sharesWord = (s) => {
+      const words = String(s).toLowerCase().split(/[^a-z0-9áéíóúüñ]+/)
+        .filter(w => w.length >= 3);
+      return words.some(w => kwWords.includes(w));
+    };
 
-    // 1) Catálogo: título principal + alternativos (la técnica Seekee).
-    const list = await metaSearch(kw);
-    for (const m of list) {
-      push(m.title);
-      for (const a of (m.alt || [])) {
-        if (out.length >= 8) break;
-        push(a);
+    // 0) PLANTILLAS ES (G6): el sello del buscador en español.
+    const multiWord = /\s/.test(kw);
+    const templateBudget = multiWord ? 5 : 3;
+    if (!multiWord) {
+      // 1) Catálogo primero (autocompletar la palabra suelta).
+      const list = await metaSearch(kw);
+      for (const m of list) {
+        if (out.length >= 6) break;
+        push(m.title);
+        for (const a of (m.alt || [])) {
+          if (out.length >= 6) break;
+          if (!sharesWord(a)) continue;   // G6: sin sinónimos ajenos (italiano/alemán…)
+          push(a);
+        }
       }
-      if (out.length >= 8) break;
     }
+    for (const t of ES_TEMPLATES) {
+      if (out.length >= (multiWord ? 5 : 8)) break;
+      push(t(kw));
+    }
+    if (multiWord) {
+      // 1-bis) Catálogo después (refinar el título exacto).
+      const list = await metaSearch(kw);
+      for (const m of list) {
+        if (out.length >= 10) break;
+        push(m.title);
+        for (const a of (m.alt || [])) {
+          if (out.length >= 10) break;
+          if (!sharesWord(a)) continue;
+          push(a);
+        }
+      }
+    }
+    void templateBudget;
 
     // 2) Bitácora: lo más buscado que empiece por o contenga la palabra.
     if (out.length < 10) {
@@ -1331,14 +1752,21 @@ module.exports = function createV4Api(ctx) {
     }).filter(g => g.sites.length);
   }
 
-  /* Dominios vigentes (WhiteListConfig): freshEnable=true solo si el
-     sitio está vivo o sin sondear aún; webFreshEnable siempre true
-     (el navegador interno puede abrir la web aunque el scraper falle).
-     v4.0 (Fase 2): _meta ahora lleva la ROTACIÓN (dominio previo,
-     cuándo cambió, fuente del descubrimiento) — la app pinta esto en
-     la pantalla "Estado de fuentes". */
-  function freshDomainList() {
-    return allSitesConfig().map(s => {
+  /* Dominios vigentes (contrato WhiteListConfig de Loklok — FORENSE-H
+     §5.1). v7.0 (H4): queryFreshDomainList v2 — además de la lista plana
+     compat (sites), el endpoint entrega el MAPA COMPLETO
+     {hub:[WhiteListConfig…], sites:[WhiteListConfig…]} con los dominios
+     PROPIOS del Hub del dueño (animax-hub-domains.json + mirrors con
+     failover del watchdog). Flags: freshEnable = captura de medios
+     (sitio vivo o sin sondear), webFreshEnable = el navegador interno
+     puede abrir la web aunque el scraper falle, desktop = UA
+     Chrome-desktop por dominio (operable por el dueño desde H4).
+     _meta lleva la ROTACIÓN (dominio previo, cuándo cambió, fuente del
+     descubrimiento) y en el Hub: primary/active/aliveMs/lastCheck.
+     freshDomainMap() es la fuente; freshDomainList() conserva la forma
+     plana EXACTA de siempre para apps y tests viejos (cero regresión). */
+  function freshDomainMap() {
+    const siteEntries = allSitesConfig().map(s => {
       const h = siteHealth.get(s.host);
       const alive = !h ? true : (Date.now() - h.ts > 30 * 60 * 1000 ? true : h.ok);
       const rot = s.rotated || null;
@@ -1346,8 +1774,10 @@ module.exports = function createV4Api(ctx) {
         url: 'https://' + s.host,
         freshEnable: alive,
         webFreshEnable: true,
+        desktop: s.desktop === true,   // v7.0 (H1): contrato WhiteListConfig completo
         _meta: {
           id: String(s.host).replace(/^www\./, '').split('.')[0],
+          role: 'site',                // v7.0 (H4): rol en el mapa v2
           kind: s.kind, lang: s.lang, aliveMs: h ? h.ms : null,
           lastCheck: h ? h.ts : null,
           previousDomain: rot ? rot.from : null,
@@ -1356,6 +1786,60 @@ module.exports = function createV4Api(ctx) {
         }
       };
     });
+
+    /* v7.0 (H4) · Dominios del HUB del dueño: la vista del watchdog da
+       la salud y el mirror ACTIVO (failover/restauración automática).
+       Sin configuración del dueño → [] honesto (la app sigue con su
+       searchServerUrl; el portal /hub no depende de esto). */
+    const hubStat = watchdog && typeof watchdog.hubStatus === 'function'
+      ? watchdog.hubStatus() : null;
+    const hubEntries = (hubDomains.hubDomainsConfig() || []).map(hd => {
+      const mir = hubStat && hubStat.mirrors
+        ? hubStat.mirrors.find(m => m.url === hd.url) : null;
+      const alive = mir ? mir.ok !== false : true;  // sin sondear → vivo
+      return {
+        url: hd.url,
+        freshEnable: hd.freshEnable && alive,
+        webFreshEnable: hd.webFreshEnable,
+        desktop: hd.desktop,
+        _meta: {
+          id: 'hub-' + (String(hd.url).replace(/^https?:\/\//, '').split('.')[0]),
+          role: 'hub',
+          kind: 'hub', lang: 'hub', aliveMs: mir ? mir.ms : null,
+          lastCheck: mir ? mir.lastCheck : null,
+          primary: hd.primary === true,
+          active: hubStat ? hubStat.active === hd.url : hd.primary === true,
+          previousDomain: hubStat && hubStat.active && hubStat.primary &&
+            hubStat.active !== hubStat.primary ? hubStat.primary : null,
+          changedAt: hubStat ? hubStat.changedAt : null,
+          discoverySource: 'hub-config'
+        }
+      };
+    });
+    return { hub: hubEntries, sites: siteEntries };
+  }
+
+  function freshDomainList() {
+    /* v7.0 (H4): la lista plana sigue siendo SOLO sites (contrato y
+       consumidores viejos intactos); el mapa {hub, sites} completo viaja
+       en el campo `v2` de la respuesta del endpoint. */
+    return freshDomainMap().sites;
+  }
+
+  /* v7.0 (H4) · MAPA v2 del endpoint queryFreshDomainList: {hub, sites,
+     primaryHub, generatedAt}. primaryHub = mirror ACTIVO del Hub (con
+     failover ya aplicado por el watchdog) o '' si el dueño no configuró
+     dominios propios — la app usa su searchServerUrl en ese caso. */
+  function freshDomainV2() {
+    const map = freshDomainMap();
+    const hubStat = watchdog && typeof watchdog.hubStatus === 'function'
+      ? watchdog.hubStatus() : null;
+    return {
+      hub: map.hub,
+      sites: map.sites,
+      primaryHub: hubStat && hubStat.configured ? hubStat.active : '',
+      generatedAt: Date.now()
+    };
   }
 
   /* v4.0 (Fase 2) · ESTADO DE FUENTES para la pantalla de la app:
@@ -1364,7 +1848,7 @@ module.exports = function createV4Api(ctx) {
      v4.0 (Fase 3): ahora TAMBIÉN con desempeño de búsqueda (hits/misses)
      y el penalty COMBINADO (reproducción + búsqueda + frescura). */
   function sourcesStatus() {
-    const base = watchdog ? watchdog.status() : { sources: [], summary: null };
+    const base = watchdog ? watchdog.status() : { sources: [], hub: null, summary: null };
     const sources = base.sources.map(s => ({
       ...s,
       penalty: statsOf(s.host).penalty,
@@ -1374,6 +1858,8 @@ module.exports = function createV4Api(ctx) {
       ok: true,
       version: VERSION,
       sources,
+      hub: base.hub || (watchdog && typeof watchdog.hubStatus === 'function'
+        ? watchdog.hubStatus() : null),   // v7.0 (H4): dominios del Hub
       summary: base.summary
     };
   }
@@ -1407,12 +1893,108 @@ module.exports = function createV4Api(ctx) {
   }
 
   function querySettings() {
-    // AppRemoveConfigData: la app descarga de AQUÍ el script sniffer →
-    // actualizable sin tocar el APK (técnica Seekee sp_html_inject_data).
+    // AppRemoveConfigData: la app descarga de AQUÍ los scripts sniffer y
+    // analyzer → actualizables sin tocar el APK (técnica Seekee
+    // sp_html_inject_data). v7.0 (H3): analyzerScriptUrl nuevo.
     return {
       detailJsScriptUrl: '/api/v1/config/sniffer.js',
+      analyzerScriptUrl: '/api/v1/config/analyzer.js',
       javasUrl: ''
     };
+  }
+
+  /* ══ v7.0 (H3) · ANALIZADOR DE PÁGINAS REMOTO (hermano del sniffer) ══
+     El MISMO script (analyzer-script.js) se sirve crudo en
+     /api/v1/config/analyzer.js (para el asset resourceAnalysis.html de la
+     app — actualizable sin APK) y se EJECUTA AQUÍ en una sandbox `vm`
+     para el endpoint /api/v1/hub/analyze: el servidor descarga la página
+     y devuelve el AnalysisResourceData (temporadas/episodios) — la misma
+     función, dos entornos, cero divergencia.                                */
+
+  let analyzerCache = null;   // { mtime, js }
+
+  /** v7.0 (H3): etiqueta de motor que viaja en /api/v1/hub/analyze. */
+  const ANALYZER_ENGINE = 'analyzer/1 (FASE H3)';
+
+  /** Carga (con caché por mtime) el JS del analizador; null si falla. */
+  function analyzerJs() {
+    try {
+      const st = fs.statSync(ANALYZER_FILE);
+      if (analyzerCache && analyzerCache.mtime === st.mtimeMs) return analyzerCache.js;
+      const resolved = require.resolve('./analyzer-script.js');
+      delete require.cache[resolved];            // recarga si cambió
+      const mod = require('./analyzer-script.js');
+      const js = mod && mod.ANALYZER_JS && String(mod.ANALYZER_JS).trim();
+      if (js && js.length >= 200) {
+        analyzerCache = { mtime: st.mtimeMs, js };
+        return js;
+      }
+      return analyzerCache ? analyzerCache.js : null;   // script inválido → lo anterior
+    } catch (e) {
+      return analyzerCache ? analyzerCache.js : null;
+    }
+  }
+
+  /** Fallback embebido mínimo (solo si analyzer-script.js desaparece):
+      contrato válido con seasons vacías — NUNCA 404 ni basura. */
+  const ANALYZER_JS_MIN = `(function () {
+  'use strict';
+  var w = (typeof window !== 'undefined') ? window : this;
+  if (w) { w.__animaxAnalyzerRemoteV1 = true; }
+  function onceAnalyzer(html, pageUrl) {
+    try {
+      var t = String(html || '').match(/<title>([^<]{3,160})<\\/title>/i);
+      return JSON.stringify({
+        pageBaseInfo: { title: (t && t[1]) ? t[1] : '', cover: '', description: '' },
+        seasons: []
+      });
+    } catch (e) {
+      return '{"pageBaseInfo":{"title":"","cover":"","description":""},"seasons":[]}';
+    }
+  }
+  if (w) { w.onceAnalyzer = onceAnalyzer; w.onceParser = onceAnalyzer; }
+  return onceAnalyzer;
+})();`;
+
+  /**
+   * Ejecuta onceAnalyzer(html, url) en una sandbox `vm` (timeout 4 s,
+   * sin red, sin require) — el analizador es puro string, así que la
+   * sandbox es hermética. Devuelve el objeto {pageBaseInfo, seasons}
+   * parseado o null (NUNCA lanza).
+   */
+  function runAnalyzer(html, pageUrl) {
+    try {
+      const src = analyzerJs() || ANALYZER_JS_MIN;
+      const sandbox = { window: {} };
+      vm.createContext(sandbox);
+      vm.runInContext(src, sandbox, { timeout: 4000, displayErrors: false });
+      const fn = sandbox.window && (sandbox.window.onceAnalyzer || sandbox.window.onceParser);
+      if (typeof fn !== 'function') return null;
+      const raw = String(fn(String(html || ''), String(pageUrl || '')) || '');
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object' || !Array.isArray(obj.seasons)) return null;
+      return obj;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Analiza una página REAL: la descarga (request del ctx: UA/redirects/
+      proxy heredados del motor) y ejecuta el analizador. Cacheada 30 min
+      por URL. null si la página o el análisis fallan (NUNCA lanza). */
+  async function hubAnalyze(pageUrl) {
+    const key = 'hub:analyze:' + pageUrl;
+    const cached = cacheGet(key, 30 * 60 * 1000);
+    if (cached) return cached;
+    let data = null;
+    try {
+      const r = await request(pageUrl, { timeoutMs: 12000, maxBytes: 3 * 1024 * 1024 });
+      if (r && r.ok && r.body && r.body.length > 60) {
+        data = runAnalyzer(r.body, pageUrl);
+      }
+    } catch (e) { data = null; }
+    if (data) cacheSet(key, data);
+    return data;
   }
 
   /* ── v4.0 (Fase 21) · UPDATE IN-APP REAL ──────────────────────────
@@ -1470,7 +2052,7 @@ module.exports = function createV4Api(ctx) {
   /* ════════════════════════════════════════════════════════════════
      ROUTER v4 — devuelve true si gestionó la petición
      ════════════════════════════════════════════════════════════════ */
-  return async function v4Route(req, res, path, query, started) {
+  const v4Route = async function (req, res, path, query, started) {
     const method = req.method;
     // Query params Y body JSON se funden (los HashMap de Retrofit llegan
     // como query en GET y como body en POST — aceptamos ambos).
@@ -1497,8 +2079,13 @@ module.exports = function createV4Api(ctx) {
       return ok({ ok: true, data: await albumDetail(titles, f.type) });
     }
 
+    /* v6.0 (G8) · paridad del contrato Seekee getGuideImgList (FORENSE-G8):
+       Seekee devuelve aquí las URLs de las imágenes del onboarding. AniMax
+       lleva las guías EMBEBIDAS en el APK (assets/onboarding/ → offline-
+       safe), así que la lista va vacía; si un operador quiere servir las
+       suyas puede añadirlas como imageUrl en /config/onboarding. */
     if (path === '/api/v1/app/content/home/getGuideImgList' && method === 'GET') {
-      return ok({ ok: true, data: [] });   // AniMax no lleva onboarding con imágenes
+      return ok({ ok: true, data: [] });
     }
 
     /* ══ v4.0 (Fase 9) · ONBOARDING (4 pasos) + PANEL DE SECCIONES ══
@@ -1506,6 +2093,9 @@ module.exports = function createV4Api(ctx) {
        reescribe las secciones de cada tab y TODAS las apps lo reflejan
        en su siguiente getSectionContentByPage — sin publicar APK. */
     if (path === '/api/v1/config/onboarding' && method === 'GET') {
+      /* v6.0 (G8): cada paso acepta `imageUrl` OPCIONAL (URL absoluta o ruta
+         servida por el operador) — si viene, la app la muestra en el pager
+         del onboarding en lugar de la ilustración embebida del APK. */
       return ok({ ok: true, data: [
         { title: 'Bienvenido a AniMax', description: 'Todo el catálogo de Seekee, sin anuncios y privado. Latino → Castellano → Sub siempre.', emoji: '🍿' },
         { title: 'Todo disponible', description: 'Si una web se abre en un navegador, se reproduce en AniMax: el motor WebView abre los players y extrae el vídeo.', emoji: '▶️' },
@@ -1518,9 +2108,11 @@ module.exports = function createV4Api(ctx) {
       const cfg = sectionsConfig();
       const tabs = {};
       for (const [code, defs] of Object.entries(cfg)) {
-        tabs[code] = defs.map(d => ({ id: d.id, name: d.sectionName, style: d.style, sort: d.sort }));
+        // v7.0 (H5): el panel refleja genre/localFeed además de lo de siempre
+        tabs[code] = defs.map(d => ({ id: d.id, name: d.sectionName, style: d.style, sort: d.sort,
+          genre: d.genre || '', localFeed: d.localFeed === true }));
       }
-      return ok({ ok: true, data: { tabs } });
+      return ok({ ok: true, data: { tabs }, _meta: { estilos: SECTION_STYLES, feedsLocales: LOCAL_FEED_STYLES } });
     }
 
     if (path === '/api/v1/config/sections' && method === 'POST') {
@@ -1540,12 +2132,15 @@ module.exports = function createV4Api(ctx) {
             id: Number(s.id) || (defs.length + 1),
             name: String(s.name).slice(0, 60),
             style: s.style,
-            sort: CFG_SORTS.includes(s.sort) ? s.sort : 'trending'
+            sort: CFG_SORTS.includes(s.sort) ? s.sort : 'trending',
+            // v7.0 (H5): género paramétrico + feed local persistidos
+            genre: typeof s.genre === 'string' && s.genre.trim() ? s.genre.trim().slice(0, 40) : '',
+            localFeed: LOCAL_FEED_STYLES.includes(s.style) || s.localFeed === true
           });
         }
         if (defs.length) { clean[code] = defs; total += defs.length; }
       }
-      if (!total) return ok({ ok: false, error: 'ninguna sección válida (name + style BANNER|CONTINUE|SINGLE_ALBUM|RANK_LIST|MULTIPLE_ALBUM)' });
+      if (!total) return ok({ ok: false, error: 'ninguna sección válida (name + style BANNER|CONTINUE|SINGLE_ALBUM|RANK_LIST|MULTIPLE_ALBUM|SEASON_NOW|TRENDING_NOW|GENRE_ROW|MY_LIST)' });
       try {
         fs.writeFileSync(SECTIONS_FILE, JSON.stringify({ tabs: clean }, null, 2) + '\n');
         cfgCache = { mtime: 0, data: null };   // invalida: próximo GET recarga
@@ -1560,14 +2155,20 @@ module.exports = function createV4Api(ctx) {
       return ok({ ok: true, data: navigationList(req) });
     }
     if (path === '/api/v1/app/content/website/queryFreshDomainList' && method === 'GET') {
-      return ok({ ok: true, data: freshDomainList() });
+      /* v7.0 (H4): `data` = lista plana de SITIOS (contrato idéntico a
+         H0–H3, cero regresión) + campo `v2` con el mapa COMPLETO
+         {hub:[WhiteListConfig…], sites:[…], primaryHub, generatedAt}. */
+      return ok({ ok: true, data: freshDomainList(), v2: freshDomainV2() });
     }
 
     /* ════════ v4.0 (FASE 2) · WATCHDOG DE DOMINIOS ════════
        Estado de fuentes (salud por sitio, última verificación,
        rotaciones, reputación) + disparo manual de un ciclo. */
     if (path === '/api/v1/config/sources/status' && method === 'GET') {
-      return ok(sourcesStatus());
+      const st = sourcesStatus();
+      /* v6.0 (G2): salud de los proveedores reales (allanime/hianime) */
+      if (providers) st.providers = providers.status();
+      return ok(st);
     }
     if (path === '/api/v1/config/sources/refresh' && method === 'POST') {
       if (!watchdog) return ok({ ok: false, error: 'watchdog-no-disponible' });
@@ -1642,7 +2243,16 @@ module.exports = function createV4Api(ctx) {
       const key = 'v4:search:' + kw.toLowerCase() + ':' + (f.page || 1);
       let data = cacheGet(key, TTL.search);
       if (!data) { data = await seekeeSearch(kw, f.page, f.pageSize, f.type); cacheSet(key, data); }
-      return ok({ ok: true, ...data });
+      /* v7.0 (H2) · HUB 2.0: el caché guarda hubUrl '' — se llena AQUÍ,
+         por petición, con el host que pide (fillHubUrls arriba). */
+      fillHubUrls(data, req);
+      /* v7.0 (H5) · «siempre encuentra»: la tarjeta de la PÁGINA PROPIA
+         del Hub AL FRENTE cuando el título está en el catálogo. Parámetro
+         honesto `hub` (por defecto 1): `hub=0` la desactiva SIN cambiar
+         nada más de la respuesta (contrato intacto, solo se resta). */
+      const hubOn = String(f.hub === undefined ? '1' : f.hub) !== '0';
+      const out = hubFrontCard(data, req, hubOn);
+      return ok({ ok: true, ...out });
     }
     if (path === '/api/v1/search/relatedQueries' && method === 'GET') {
       const kw = String(f.keyWord || '').trim();
@@ -1720,6 +2330,38 @@ module.exports = function createV4Api(ctx) {
       });
       return res.end(js || SNIFFER_JS);
     }
+    /* ══ v7.0 (H3) · ANALYZER v1 — hermano del sniffer: se sirve desde
+       analyzer-script.js con caché por mtime (editar ese archivo en el
+       servidor actualiza el analizador de TODAS las apps SIN publicar
+       APK — el arreglo definitivo de «dejó de funcionar un sitio»).
+       Si falta o falla → versión mínima embebida (nunca 404 ni vacío). */
+    if ((path === '/api/v1/config/analyzer.js' || path === '/api/v1/config/analyzer') && method === 'GET') {
+      const js = analyzerJs() || ANALYZER_JS_MIN;
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+        'Access-Control-Allow-Origin': '*'
+      });
+      return res.end(js);
+    }
+    /* ══ v7.0 (H3) · ANÁLISIS EN EL SERVIDOR: el MISMO script del analyzer
+       se ejecuta aquí (sandbox vm) sobre la página descargada — el hub
+       watch (/hub/watch) lo llama para las TEMPORADAS reales y el
+       contrato AnalysisResourceData (H1) viaja completo. GET ?u= o POST
+       {pageUrl}. Sin página/datos → ok:false honesto (nunca lanza). */
+    if (path === '/api/v1/hub/analyze' && (method === 'GET' || method === 'POST')) {
+      const pageUrl = String(f.pageUrl || f.u || '').trim();
+      if (!/^https?:\/\//i.test(pageUrl)) {
+        return ok({ ok: false, error: 'bad-url', engine: ANALYZER_ENGINE });
+      }
+      const data = await hubAnalyze(pageUrl);
+      return ok({
+        ok: !!data,
+        engine: ANALYZER_ENGINE,
+        pageUrl,
+        data: data || { pageBaseInfo: { title: '', cover: '', description: '' }, seasons: [] }
+      });
+    }
     if (path === '/api/v1/config/appUpdate/check' && method === 'GET') {
       // v4.0 (Fase 21): compara contra el versionCode QUE REPORTA LA APP.
       return ok({ ok: true, ...appUpdateCheck(f.versionCode) });
@@ -1778,6 +2420,62 @@ module.exports = function createV4Api(ctx) {
       return ok({ ok: true, host, penalty: penaltyTotalOf(host) });
     }
 
+    /* ══ v6.0 (G4) · DIAGNÓSTICO DEL DUEÑO — stats de bloqueos de ads ══
+       La app (opcional, NO automático: cero telemetría por defecto)
+       reporta cuántos anuncios bloqueó y los hosts más frecuentes
+       (anónimo, deviceId local). Sirve para afinar las listas: si un
+       host domina los bloqueos, entra en ad_hosts del server.
+         POST {deviceId, blocked, topHosts:[{host,count}]}
+         GET  → resumen acumulado (curl / pantalla del dueño).          */
+    const ADBLOCK_STATS_FILE = pathMod.join(__dirname, 'animax-adblock-stats.json');
+    function adblockStatsLoad() {
+      try { return JSON.parse(fs.readFileSync(ADBLOCK_STATS_FILE, 'utf8')); }
+      catch { return { devices: {}, updatedAt: null }; }
+    }
+    function adblockStatsSave(db) {
+      try { fs.writeFileSync(ADBLOCK_STATS_FILE, JSON.stringify(db)); } catch {}
+    }
+    if (path === '/api/v1/report/adblock' && method === 'POST') {
+      const deviceId = String(f.deviceId || '').trim().slice(0, 64);
+      const blocked = Math.max(0, Math.min(100000, Number(f.blocked) || 0));
+      const topHosts = Array.isArray(f.topHosts) ? f.topHosts.slice(0, 50) : [];
+      if (!deviceId) return ok({ ok: false, error: 'falta deviceId' });
+      const db = adblockStatsLoad();
+      const prev = db.devices[deviceId] || { total: 0, topHosts: {} };
+      const merged = { ...prev.topHosts };
+      for (const th of topHosts) {
+        if (!th || !th.host) continue;
+        const host = String(th.host).slice(0, 120);
+        merged[host] = (merged[host] || 0) + (Number(th.count) || 0);
+      }
+      db.devices[deviceId] = {
+        total: (prev.total || 0) + blocked,
+        topHosts: Object.fromEntries(
+          Object.entries(merged).sort((a, b) => b[1] - a[1]).slice(0, 50)
+        ),
+        updatedAt: new Date().toISOString()
+      };
+      db.updatedAt = db.devices[deviceId].updatedAt;
+      adblockStatsSave(db);
+      return ok({ ok: true, total: db.devices[deviceId].total });
+    }
+    if (path === '/api/v1/report/adblock' && method === 'GET') {
+      const db = adblockStatsLoad();
+      const devices = Object.keys(db.devices || {}).length;
+      const total = Object.values(db.devices || {}).reduce((s, d) => s + (d.total || 0), 0);
+      const top = {};
+      for (const d of Object.values(db.devices || {})) {
+        for (const [h, c] of Object.entries(d.topHosts || {})) top[h] = (top[h] || 0) + c;
+      }
+      return ok({
+        ok: true, devices,
+        totalBlocked: total,
+        topHosts: Object.entries(top).sort((a, b) => b[1] - a[1]).slice(0, 20)
+          .map(([host, count]) => ({ host, count })),
+        updatedAt: db.updatedAt || null
+      });
+    }
+
     /* ════════ RECOMENDADOS (contrato /buscari/api/content/recommend/list) ════════ */
     if (path === '/api/v1/api/content/recommend/list' && method === 'GET') {
       const key = 'v4:recommend';
@@ -1791,6 +2489,256 @@ module.exports = function createV4Api(ctx) {
        ANIMAX_AI_KEY y ANIMAX_AI_MODEL en el servidor. La app NUNCA ve
        la clave. Sin configurar → error "ai-no-configurada" y la app usa
        su fallback local (sin fingir IA). Cero telemetría.               */
+    /* ════════ v6.0 (G2) · PROVEEDORES REALES DE EPISODIOS ════════
+       Un solo call para la app: título + episodio + idioma → FUENTES
+       reproducibles (HLS/MP4/embeds resueltos en profundidad). Cadena:
+       proveedores (allanime → hianime) → motor propio v3. Si TODO
+       falla, ok:false y la app usa su extractor local del WebView. */
+    if (path === '/api/v1/app/episode/list' && (method === 'GET' || method === 'POST')) {
+      const q = String(f.q || f.title || '').trim();
+      const episode = Number(f.episode || f.ep || 0);
+      const lang = String(f.lang || 'any').toLowerCase();
+      if (!q) return ok({ ok: false, error: 'falta ?q= (titulo)' });
+      if (!episode || episode < 1) return ok({ ok: false, error: 'falta ?episode=' });
+      /* v6.0 (G2) · los proveedores externos son OPCIONALES: si faltan o
+         fallan, el episodio se resuelve con el MOTOR v3 (fallback más
+         abajo). Ya no hay 'proveedores-no-disponibles' duro. */
+      if (!providers && typeof buildOptions !== 'function') {
+        return ok({ ok: false, error: 'proveedores-no-disponibles' });
+      }
+
+      const key = 'prov:res:' + q.toLowerCase() + '|' + episode + '|' + lang;
+      const hit = cacheGet(key, TTL.resolve || 900000);
+      if (hit) return ok({ ok: true, cached: true, ...hit });
+
+      // 1) Buscar el título en los proveedores y elegir el mejor match.
+      const provErrors = [];
+      let candidates = [];
+      try { candidates = providers ? await providers.searchShow(q) : []; } catch { /* defensivo */ }
+      const best3 = candidates.filter(c => c.score >= 0.6).slice(0, 3);
+      if (!best3.length) best3.push(...candidates.slice(0, 2));
+      if (!best3.length) provErrors.push('proveedores externos: sin resultados para el título');
+
+      // 2) Fuentes por candidato (máx 3) → embeds → resolución profunda.
+      const sources = [];
+      let fallbackUsed = false;   // v6.0 (G2): true si resolvió el motor propio
+      for (const cand of best3) {
+        if (sources.length >= 6) break;
+        try {
+          const { sources: src, errors } = await providers.streamsOf(cand.provider + ':' + cand.showId, episode, lang);
+          if (errors && errors.length) provErrors.push(...errors);
+          for (const s of src) {
+            if (sources.length >= 6) break;
+            if (s.type === 'embed' && typeof deepResolveFarm === 'function') {
+              try {
+                const direct = await deepResolveFarm(s.url, '');
+                if (direct) {
+                  let valid = false;
+                  try { valid = !!(await quickValidate(direct, s.referer)); } catch { valid = false; }
+                  sources.push({ ...s, url: direct, type: /\.m3u8(\?|$)/i.test(direct) ? 'hls' : 'mp4', resolvedFrom: s.url, valid });
+                  continue;
+                }
+              } catch { /* embed roto → siguiente */ }
+              // sin resolución profunda → se entrega como embed de respaldo
+              sources.push({ ...s, valid: false });
+              continue;
+            }
+            let valid = false;
+            try { valid = !!(await quickValidate(s.url, s.referer)); } catch { valid = false; }
+            sources.push({ ...s, valid });
+          }
+        } catch (e) {
+          provErrors.push(cand.provider + ': ' + String(e && e.message || e).slice(0, 140));
+        }
+      }
+
+      /* v6.0 (G2) · FALLBACK MOTOR PROPIO: proveedores externos no dieron
+         NADA (Cloudflare 403, dominio caído, título raro) → el episodio se
+         caza con el motor v3 del SERVIDOR (búsqueda directa en los sitios
+         vivos + granja profunda + validación). Mismo contrato de fuentes:
+         el teléfono ni se entera de qué cadena funcionó. Límite de 2
+         opciones y 6 fuentes para respetar el readTimeout (30 s) del app. */
+      if (!sources.length && typeof buildOptions === 'function' && typeof resolveStream === 'function') {
+        try {
+          const built = await buildOptions(q);
+          const opts = (built && built.options) || [];
+          const LANG_RANK = { latino: 0, castellano: 1, sub: 2 };
+          const wanted = ['latino', 'castellano', 'sub'].includes(lang) ? lang : null;
+          const pool = (opts || [])
+            .filter(o => o && o.pageUrl && /^https?:\/\//i.test(o.pageUrl))
+            .filter(o => !wanted || o.lang === wanted)
+            .filter(o => (typeof siteIsUsable !== 'function') || siteIsUsable(o.host) !== false)
+            .sort((a, b) => (LANG_RANK[a.lang] ?? 2) - (LANG_RANK[b.lang] ?? 2))
+            .slice(0, 2);
+          if (!pool.length) provErrors.push('motor propio: sin opciones vivas para "' + q + '"');
+          for (const opt of pool) {
+            if (sources.length >= 6) break;
+            try {
+              const r = await resolveStream({ pageUrl: opt.pageUrl, episodeUrl: '', episode, lang: opt.lang });
+              const mirrors = (r && r.mirrors) || [];
+              for (const m of mirrors) {
+                if (sources.length >= 6) break;
+                if (!m || !m.url || !/^https?:\/\//i.test(m.url)) continue;
+                const isEmb = !!m.isIframe;
+                sources.push({
+                  url: m.url,
+                  provider: opt.host || hostOf(opt.pageUrl),
+                  server: m.serverName || m.label || 'espejo',
+                  quality: '',
+                  type: isEmb ? 'embed' : (/\.m3u8(\?|$)/i.test(m.url) ? 'hls' : 'mp4'),
+                  lang: opt.lang || 'sub',
+                  referer: m.referer || opt.pageUrl,
+                  valid: m.validated === true,
+                  source: 'engine-v3'
+                });
+              }
+            } catch (e) {
+              provErrors.push('motor:' + (opt.host || '?') + ': ' + String(e && e.message || e).slice(0, 120));
+            }
+          }
+          if (sources.length) {
+            fallbackUsed = true;
+            provErrors.push('resuelto con el motor propio (engine-v3): ' + sources.length + ' fuente(s)');
+          }
+        } catch (e) {
+          provErrors.push('motor propio: ' + String(e && e.message || e).slice(0, 120));
+        }
+      }
+
+      // 3) Orden: validados primero, HLS/MP4 antes que embed.
+      sources.sort((a, b) => (b.valid - a.valid) || ((a.type === 'embed') - (b.type === 'embed')));
+      const payload = {
+        query: q, episode, lang, total: sources.length,
+        sources,
+        engine: fallbackUsed ? 'engine-v3' : 'providers',
+        providerErrors: provErrors.slice(0, 6),
+        candidates: best3.map(c => ({ provider: c.provider, showId: c.showId, title: c.title, score: c.score }))
+      };
+      if (sources.length) cacheSet(key, payload);
+      if (!sources.length && providers) payload.providerStatus = providers.status();
+      return ok({ ok: sources.length > 0, ...payload });
+    }
+
+    if (path === '/api/v1/app/episode/resolve' && method === 'POST') {
+      const showRef = String(f.showRef || f.showId || '').trim();
+      const episode = Number(f.episode || 0);
+      const lang = String(f.lang || 'any').toLowerCase();
+      if (!showRef || !episode) return ok({ ok: false, error: 'faltan showRef|episode' });
+
+      /* v6.0 (G2) · refs "engine:<pageUrl>" → MOTOR PROPIO. Igual que el
+         fallback de episode/list: la granja profunda resuelve el episodio
+         desde la página del sitio, sin proveedores externos. */
+      if (showRef.startsWith('engine:')) {
+        const pageUrl = showRef.slice('engine:'.length).trim();
+        if (!/^https?:\/\//i.test(pageUrl)) return ok({ ok: false, error: 'engine-ref-invalida' });
+        try {
+          const r = await resolveStream({ pageUrl, episodeUrl: '', episode, lang });
+          const sources = ((r && r.mirrors) || []).filter(m => m && m.url).slice(0, 6).map(m => ({
+            url: m.url,
+            provider: hostOf(pageUrl),
+            server: m.serverName || m.label || 'espejo',
+            quality: '',
+            type: m.isIframe ? 'embed' : (/\.m3u8(\?|$)/i.test(m.url) ? 'hls' : 'mp4'),
+            lang: lang === 'any' ? 'sub' : lang,
+            referer: m.referer || pageUrl,
+            valid: m.validated === true,
+            source: 'engine-v3'
+          }));
+          return ok({ ok: sources.length > 0, episode, lang, total: sources.length, sources, engine: 'engine-v3' });
+        } catch (e) {
+          return ok({ ok: false, error: 'engine-resolve: ' + String(e && e.message || e).slice(0, 140) });
+        }
+      }
+
+      if (!providers) return ok({ ok: false, error: 'proveedores-no-disponibles' });
+      try {
+        const { sources: src, errors } = await providers.streamsOf(showRef, episode, lang);
+        const sources = [];
+        for (const s of src) {
+          if (s.type === 'embed' && typeof deepResolveFarm === 'function') {
+            try {
+              const direct = await deepResolveFarm(s.url, '');
+              if (direct) { sources.push({ ...s, url: direct, type: /\.m3u8(\?|$)/i.test(direct) ? 'hls' : 'mp4', resolvedFrom: s.url }); continue; }
+            } catch { /* siguiente */ }
+          }
+          sources.push(s);
+        }
+        return ok({ ok: sources.length > 0, episode, lang, total: sources.length, sources, providerErrors: errors.slice(0, 6) });
+      } catch (e) {
+        return ok({ ok: false, error: 'resolve-error: ' + String(e && e.message || e).slice(0, 140) });
+      }
+    }
+
+    /* ════════ v6.0 (G3+G9) · CONFIG IA (quick prompts en español) ════════
+       Equivalente propio de /quan/tools/ai/center/config/info de Seekee
+       (FORENSE-G9: AiChatResp → AiCenterConfig → AiTabSubConfig): el
+       CONTENIDO del chat lo define NUESTRO servidor — bienvenida, sugerencias
+       y placeholder — sin credenciales de terceros y sin publicar APK.
+       Override del operador: animax-ai-config.json junto a este archivo
+       (patrón sections-config.json, caché por mtime; archivo ausente o
+       corrupto → valores por defecto, el endpoint NUNCA se rompe). */
+    const AI_CFG_FILE = pathMod.join(__dirname, 'animax-ai-config.json');
+    const AI_CFG_DEFAULT = {
+      welcomeText: '¡Hola! Soy AniMax IA, tu guía de anime, películas y series. Pregúntame qué ver y te doy recomendaciones en español, con chips «Buscar en la app» para ir directo a la lupa.',
+      description: 'Recomendaciones y guía dentro de AniMax. Toca una sugerencia o escribe tu pregunta.',
+      inputPrompt: 'Pregúntame qué ver…',
+      quickPrompts: [
+        { code: 'recomienda', label: 'Recomiéndame algo', prompt: 'Recomiéndame 5 animes buenos y por qué' },
+        { code: 'similar', label: 'Parecidos a…', prompt: 'Dime 5 animes similares a ' },
+        { code: 'resumen', label: 'Sin spoilers', prompt: 'Resume este anime sin spoilers: ' },
+        { code: 'final-cerrado', label: 'Final cerrado', prompt: 'Animes buenos con final cerrado' },
+        { code: 'cortos', label: 'Serie corta (≤12 eps)', prompt: 'Animes muy buenos de 12 episodios o menos' },
+        { code: 'top-accion', label: 'Top acción', prompt: 'Los 5 mejores animes de acción con buena animación' },
+        { code: 'deportes', label: 'Deportes', prompt: 'Animes deportivos que valgan la pena' },
+        { code: 'romance', label: 'Romance', prompt: 'Animes de romance maduros y bien escritos' },
+        { code: 'clasifican', label: 'Ayúdame a elegir', prompt: 'Estoy entre dos animes: ' },
+        { code: 'peliculas', label: 'Películas', prompt: 'Las 5 mejores películas anime imprescindibles' }
+      ]
+    };
+    let aiCfgCache = { mtime: 0, data: null };
+    function aiConfig() {
+      try {
+        const st = fs.statSync(AI_CFG_FILE);
+        if (aiCfgCache.data && st.mtimeMs === aiCfgCache.mtime) return aiCfgCache.data;
+        const raw = JSON.parse(fs.readFileSync(AI_CFG_FILE, 'utf8'));
+        const clean = {
+          welcomeText: String(raw.welcomeText || AI_CFG_DEFAULT.welcomeText),
+          description: String(raw.description || AI_CFG_DEFAULT.description),
+          inputPrompt: String(raw.inputPrompt || AI_CFG_DEFAULT.inputPrompt),
+          quickPrompts: Array.isArray(raw.quickPrompts) && raw.quickPrompts.length
+            ? raw.quickPrompts
+                .filter(p => p && p.label && p.prompt !== undefined)
+                .map((p, i) => ({
+                  code: String(p.code || ('p' + (i + 1))),
+                  label: String(p.label),
+                  prompt: String(p.prompt)
+                }))
+            : AI_CFG_DEFAULT.quickPrompts
+        };
+        aiCfgCache = { mtime: st.mtimeMs, data: clean };
+        return clean;
+      } catch {
+        return AI_CFG_DEFAULT;   // sin override del operador (o corrupto)
+      }
+    }
+    if (path === '/api/v1/ai/config' && method === 'GET') {
+      const cfg = aiConfig();
+      return ok({
+        ok: true,
+        // v6.0 (G9): bandera de capacidad por AiType (paridad Text/Image).
+        // Image queda DESACTIVADA hasta que el operador conecte un backend
+        // de imágenes — no se finge capacidad que no hay.
+        aiTypes: [
+          { code: 'Text', name: 'Chat', enabled: !!process.env.ANIMAX_AI_URL },
+          { code: 'Image', name: 'Imagen', enabled: false }
+        ],
+        welcomeText: cfg.welcomeText,
+        description: cfg.description,
+        inputPrompt: cfg.inputPrompt,
+        quickPrompts: cfg.quickPrompts
+      });
+    }
+
     if (path === '/api/v1/ai/chat' && method === 'POST') {
       const messages = Array.isArray(f.messages) ? f.messages : [];
       if (!messages.length) return ok({ ok: false, error: 'faltan messages' });
@@ -2005,6 +2953,15 @@ module.exports = function createV4Api(ctx) {
 
     return false;   // no era ruta v4 → sigue el router clásico
   };
+
+  /* v7.0 (H5): ganchos para el arnés de pruebas (test-H5-v4.js) —
+     normalización reforzada, ranking y tarjeta del Hub, sin arrancar
+     server. El router en runtime no los usa. */
+  v4Route._h5 = {
+    normalizeTitleV2, titleRankV2, buildHubCard, hubFrontCard,
+    LANG_PRIORITY, SECTION_STYLES, LOCAL_FEED_STYLES, anilistSeasonOf
+  };
+  return v4Route;
 };
 
 /* Expuesto solo para el arnés de pruebas (test-v4-api.js). */

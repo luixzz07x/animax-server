@@ -2,6 +2,7 @@
 /* ════════════════════════════════════════════════════════════════════════
    AniMax 4.0.0 · FASE 7 — SNIFFER DE VÍDEO (sniffer-script.js)
    Espejo del ResourceAnalysisScript de Seekee 1.4.0.
+   v7.0 (FASE H3): patrón /index-*.m3u8 + headers (Referer) por hallazgo.
    ════════════════════════════════════════════════════════════════════════
 
    USO:
@@ -39,13 +40,13 @@
 
 'use strict';
 
-/* v4.0 (Fase 7): el cuerpo inyectable. Sin backticks ni interpolación
-   para poder copiarse TAL CUAL a la constante SNIFFER_JS de v4-api.js
-   (template literal de Node) y a SNIPPER_FALLBACK_JS de VideoSniffer.kt
-   (raw string de Kotlin: tampoco puede contener '$'). */
+/* v4.0 (Fase 7) + v7.0 (FASE H3): el cuerpo inyectable. Sin backticks ni
+   interpolación para poder copiarse TAL CUAL a la constante SNIFFER_JS de
+   v4-api.js (template literal de Node) y a SNIPPER_FALLBACK_JS de
+   VideoSniffer.kt (raw string de Kotlin: tampoco puede contener '$'). */
 const SNIFFER_JS = `(function () {
   'use strict';
-  /* AniMax ResourceAnalysisScript v4.0 (Fase 7) — espejo del sniffer de
+  /* AniMax ResourceAnalysisScript v4.2 (FASE H3) — espejo del sniffer de
      Seekee 1.4.0. Detección en vivo de recursos de vídeo para el puente
      nativo (VideoSniffer.kt). Nunca rompe la página anfitriona. */
   if (window.__animaxSnifferV1) { return; }
@@ -53,6 +54,11 @@ const SNIFFER_JS = `(function () {
 
   /* ---------------- Clasificación ---------------- */
   var M3U8_RE = /(?:\\.|=)m3u8(?:\\?|#|$)/i;
+  /* v7.0 (FASE H3) · patrón HLS del ProxyWebRequestInterceptor de Seekee:
+     manifiestos variant /index-(a\\d+|v\\d+-a\\d+|v\\d+)\\.m3u8 — si un
+     sitio los sirve sin "m3u8" reconocible a simple vista o con servidores
+     raros, esta regex los clasifica como M3U8 igual que el original. */
+  var HLS_INDEX_RE = /\\/index-(a\\d+|v\\d+-a\\d+|v\\d+)\\.m3u8/i;
   var MP4_RE = /(?:\\.|=)(mp4|m4v|mov|webm|mkv|flv|3gp)(?:\\?|#|$)/i;
   var PLAYER_RE = /(filemoon|dood(?:stream)?|mixdrop|streamtape|streamwish|vidmoly|uqload|mp4upload|ok\\.ru|okru|streamsb|megacloud|embtaku)/i;
   var VIDEO_CT_RE = /(mpegurl|application\\/mp4|video\\/mp4)/i;
@@ -75,11 +81,22 @@ const SNIFFER_JS = `(function () {
     try {
       if (!u || typeof u !== 'string' || u.length < 5) { return ''; }
       if (u.indexOf('data:') === 0 || u.indexOf('javascript:') === 0) { return ''; }
-      if (M3U8_RE.test(u)) { return 'M3U8'; }
+      if (M3U8_RE.test(u) || HLS_INDEX_RE.test(u)) { return 'M3U8'; }
       if (MP4_RE.test(u)) { return 'MP4'; }
       if (PLAYER_RE.test(u)) { return 'IFRAME'; }
       return '';
     } catch (e) { return ''; }
+  }
+
+  /* v7.0 (FASE H3) · CABECERAS junto a cada hallazgo (espejo del
+     mediaRequestHeader de VideoPlayerBean): el Referer de la página es
+     lo que ExoPlayer reinyectará con setDefaultRequestProperties (H6)
+     para los streams que exigen saber de dónde vienen. */
+  function headersFor() {
+    try {
+      var h = { Referer: String(location.href).substring(0, 500) };
+      return h;
+    } catch (e) { return {}; }
   }
 
   function report(url, type) {
@@ -96,7 +113,8 @@ const SNIFFER_JS = `(function () {
         type: type,
         title: (document.title || '').substring(0, 200),
         pageUrl: location.href,
-        ts: Date.now()
+        ts: Date.now(),
+        headers: headersFor()
       }));
     } catch (e) { /* nunca romper la página */ }
   }

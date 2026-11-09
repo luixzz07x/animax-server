@@ -1,6 +1,7 @@
 'use strict';
 /* ═════════════════════════════════════════════════════════════════════
-   AniMax Server v4.1 · FASE D0.5 — PÁGINAS PROPIAS UNIFICADAS (hub.js)
+   AniMax Server v7.0 · FASE H3 — HUB 2.0 · BRIDGE COMPLETO + ANALIZADOR
+   REMOTO (hub.js)
    ═════════════════════════════════════════════════════════════════════
    Espejo de las "páginas propias" de Seekee 1.4.0 halladas en el APK:
 
@@ -19,22 +20,50 @@
    H5 PROPIAS (sin anuncios, tema oscuro de la app) que la app abre en su
    WebView interno con el MISMO estilo de puente:
 
-   · GET /hub                        → portada propia (buscador + ranking)
+   v7.0 (FASE H2) · HUB 2.0 — de 2 páginas a PORTAL completo (el
+   «tiktik.pro» de AniMax, servido por TU servidor):
+   · GET /hub                        → PORTAL: estrenos de temporada,
+                                       tendencias, teatros (Anime ·
+                                       Películas · Series · Doramas),
+                                       top-10 en vivo y géneros (AniList)
    · GET /hub?q=…                    → búsqueda unificada propia
+   · GET /hub/theater?stream=…       → TEATRO: grid + orden + género +
+                                       paginación (datos del filmCenter)
+   · GET /hub/detail?filmId|t|u      → FICHA UNIFICADA para catálogo Y
+                                       sitios externos + «Ver ahora»
    · GET /hub/watch?u=…&t=…&src=…    → FICHA-WATCH propia unificada
        - Episodios resueltos por el servidor (/api/episodes)
        - Grid de episodios en bloques de 50 (espejo de la ficha nativa)
        - Chips de FUENTES/SERVIDORES (sourceList) + dots de idioma
-       - window.quan = { switchSource(i), openEpisode(n) }   (nativo → H5)
+       - window.quan = CONTRATO COMPLETO (H1): switchEpisode(n),
+         switchSeason(s), switchQuality(i), switchSource(i),
+         switchSubtitle(t), pauseVideo() + openEpisode/autoNext/currentLang
+       - Selector de CALIDAD dentro de la página (chips por espejo)
        - AnimaxHub.postMessage(jsonBody)                     (H5 → nativo)
        - Modo navegador puro: <video> propio + espejos en cascada
 
+   v7.0 (FASE H3) · BRIDGE COMPLETO + ANALIZADOR REMOTO:
+   · RESPUESTA JsResponseData (espejo H1): TODAS las acciones quan.*
+     aceptan un `uuid` y responden por AnimaxHub.postMessage con
+     {code, uuid, value} — el nativo correlaciona pregunta ↔ respuesta,
+     igual que quan_function.postMessage en Seekee 1.4.0.
+   · switchSeason REAL: la página analiza la página de origen con el
+     ANALIZADOR REMOTO (GET /api/v1/hub/analyze — el mismo script que
+     sirve /api/v1/config/analyzer.js) y pinta chips de temporada;
+     switchSeason(s) cambia de temporada SIN recargar datos.
+   · quan.onAnalyzerSeasons(json): la APP puede alimentar las temporadas
+     con SU analizador local (ResourceAnalyzer.kt + asset
+     resourceAnalysis.html) cuando el server no pudo resolver episodios
+     — fallback CERO CAÍDAS, el mismo contrato AnalysisResourceData.
+
    Montaje: index.js llama a createHub(ctx) y le pasa cada petición
    /hub* ANTES del router clásico. ctx.seekeeSearch lo aporta v4-api.js
-   (se auto-inyecta en el ctx compartido al crearse la capa v4).
+   (se auto-inyecta en el ctx compartido al crearse la capa v4) y
+   ctx.hubPortal expone las mismas fuentes del filmCenter que la app.
+   El GATE honesto vive aquí: index.js NO devuelve 401 JSON para /hub*.
    ═════════════════════════════════════════════════════════════════════ */
 
-const HUB_VERSION = 'animax-hub/1 (FASE D0.5)';
+const HUB_VERSION = 'animax-hub/3 (FASE H3)';
 
 /* Paleta de la app (core/theme/Color.kt) para que la página propia se
    vea EXACTAMENTE como AniMax. */
@@ -93,6 +122,12 @@ module.exports = function createHub(ctx) {
   const hotTab = ctx.hotTab;
   const cacheGet = ctx.cacheGet;
   const cacheSet = ctx.cacheSet;
+  /* v7.0 (H2) · HUB 2.0: el portal se alimenta del MISMO filmCenter que
+     la app (v4-api.js expone homeSections/theaterPage/filmDetail/… en
+     ctx.hubPortal) + API key para el gate honesto «solo AniMax». */
+  const portal = ctx.hubPortal || {};
+  const API_KEY = ctx.apiKey || '';
+  const YEAR_NOW = new Date().getFullYear();
 
   /* ─────────────────────────────────────────────────────────────────
      HEAD común (tema oscuro, viewport móvil, cero recursos externos)
@@ -174,6 +209,25 @@ module.exports = function createHub(ctx) {
   .sect { margin: 20px 0 10px; font-size: 13px; color: ${C.text2};
           display: flex; align-items: center; justify-content: space-between; }
   .sect b { color: ${C.text}; font-size: 15px; }
+  /* v7.0 (H2) · portal: grid de pósters, ficha unificada y paginación */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(102px, 1fr)); gap: 10px; }
+  .pcard { display: block; }
+  .pcard img, .pcard .ph { width: 100%; aspect-ratio: 2/3; object-fit: cover;
+    border-radius: 12px; background: ${C.elevated}; display: block; }
+  .pcard b { display: block; font-size: 12px; margin: 6px 2px 0; line-height: 1.3; }
+  .pcard span { display: block; color: ${C.text2}; font-size: 10.5px; margin: 2px 2px 0; }
+  .pcard:active img { outline: 2px solid ${C.blue}; }
+  .detail { display: flex; gap: 14px; margin: 14px 0; }
+  .detail img { width: 126px; aspect-ratio: 2/3; object-fit: cover;
+    border-radius: 14px; background: ${C.elevated}; }
+  .detail .info { flex: 1; min-width: 0; }
+  .meta { color: ${C.text2}; font-size: 12px; margin: 4px 0; line-height: 1.5; }
+  .score { color: ${C.amber}; font-weight: 700; }
+  .syn { color: ${C.text2}; font-size: 13px; line-height: 1.65; margin: 12px 0; }
+  .pager { display: flex; gap: 10px; margin: 18px 0 4px; }
+  .pager a { flex: 1; text-align: center; background: ${C.surface};
+    border: 1px solid ${C.muted}44; border-radius: 12px; padding: 11px 0;
+    color: ${C.text2}; font-size: 13px; }
   .spinner {
     width: 34px; height: 34px; margin: 26px auto; border-radius: 50%;
     border: 3px solid ${C.elevated}; border-top-color: ${C.blue};
@@ -183,9 +237,10 @@ module.exports = function createHub(ctx) {
   .err { color: ${C.red}; text-align: center; margin: 22px 12px; font-size: 13.5px; }
   video { width: 100%; border-radius: 14px; background: #000; margin-top: 12px; }
   .foot { margin-top: 26px; color: ${C.muted}; font-size: 11px; text-align: center; line-height: 1.6; }
-  button.big {
+  button.big, a.big {
     width: 100%; padding: 13px; border: 0; border-radius: 14px;
     background: ${C.blue}; color: #fff; font-size: 15px; font-weight: 700;
+    display: block; text-align: center; box-sizing: border-box;
   }
   button.big:active { background: ${C.blueDark}; }
   button.ghost {
@@ -236,11 +291,13 @@ module.exports = function createHub(ctx) {
         const src = encodeSources(c.sourceList && c.sourceList.length
           ? c.sourceList.map(s => ({ u: s.url, n: s.siteName, l: s.label, g: s.lang }))
           : (c.url ? [{ u: c.url, n: c.siteName, l: '', g: 'sub' }] : []));
-        const watch = `/hub/watch?u=${encodeURIComponent(c.url || '')}` +
+        // v7.0 (H2): el resultado lleva a su FICHA PROPIA (/hub/detail),
+        // que resuelve episodios y ofrece «Ver ahora» → /hub/watch.
+        const det = `/hub/detail?u=${encodeURIComponent(c.url || '')}` +
           `&t=${encodeURIComponent(c.title || '')}` +
           (c.cover ? `&c=${encodeURIComponent(c.cover)}` : '') +
           (src ? `&src=${src}` : '') + keyQs;
-        return `<a class="card" href="${htmlEscape(watch)}" style="display:flex">
+        return `<a class="card" href="${htmlEscape(det)}" style="display:flex">
           ${c.cover ? `<img src="${htmlEscape(c.cover)}" alt="" loading="lazy">` : ''}
           <div class="info">
             <h3>${htmlEscape(c.title)}</h3>
@@ -343,9 +400,11 @@ module.exports = function createHub(ctx) {
     <b>Episodios</b>
     <span id="ep-note">${episodes.length ? (episodes.length > 50 ? 'bloques de 50' : '') : ''}</span>
   </div>
+  <div class="chips" id="seasons" style="display:none"></div>
   <div class="chips" id="blocks" style="display:none"></div>
   <div class="eps" id="eps"></div>
   <div id="status"></div>
+  <div class="chips" id="quality" style="display:none"></div>
   <div id="playerBox"></div>
 
   <div class="foot">
@@ -376,6 +435,28 @@ module.exports = function createHub(ctx) {
   var CURRENT_LANG = (SOURCES[0] && SOURCES[0].g) || 'sub';
   var AUTO_EP = 0;
   try { AUTO_EP = Number(sessionStorage.getItem('animax.autoEp')) || 0; sessionStorage.removeItem('animax.autoEp'); } catch (e) {}
+  // v7.0 (H2) · selector de CALIDAD dentro de la página (contrato
+  // quan.switchQuality): espejos etiquetados con quality tras resolver.
+  var CURRENT_PLAY = null, QUALITIES = [], qCur = 0;
+  // v7.0 (H3) · TEMPORADAS REALES (análisis remoto de la página de
+  // origen, contrato AnalysisResourceData): cuando el analizador del
+  // server (o el de la app vía onAnalyzerSeasons) encuentra >1,
+  // la página pinta chips de temporada y switchSeason funciona REAL.
+  var SEASONS = [], currentSeason = 0, seasonsTried = false;
+
+  /* ---------- RESPUESTA JsResponseData (espejo H1) ----------------
+     El nativo llama quan.switchEpisode(n, uuid) y la página le responde
+     por AnimaxHub con {code, uuid, value} — misma correlación que
+     quan_function.postMessage en Seekee. Sin uuid → no-op (barato). */
+  function respond(uuid, code, value) {
+    if (!uuid) return;
+    post({
+      type: 'js-response',
+      code: (code == null ? 0 : Number(code) | 0),
+      uuid: String(uuid),
+      value: (value == null) ? '' : JSON.stringify(value)
+    });
+  }
 
   /* ---------- puente H5 → nativo (AnimaxHub = javascriptChannel) -- */
   function post(msg) {
@@ -400,11 +481,12 @@ module.exports = function createHub(ctx) {
 
   /* ---------- bloque de 50 (series largas, espejo de la ficha) ---- */
   function renderBlocks() {
+    var total = epsActive().length;
     var box = $('blocks');
-    if (EPISODES.length <= BLOCK) { box.style.display = 'none'; return; }
+    if (total <= BLOCK) { box.style.display = 'none'; return; }
     var html = '';
-    for (var i = 0; i < EPISODES.length; i += BLOCK) {
-      var a = i + 1, b = Math.min(i + BLOCK, EPISODES.length);
+    for (var i = 0; i < total; i += BLOCK) {
+      var a = i + 1, b = Math.min(i + BLOCK, total);
       html += '<span class="chip' + (i === blockIndex * BLOCK ? ' on' : '') +
         '" data-from="' + i + '">' + a + '–' + b + '</span>';
     }
@@ -418,10 +500,11 @@ module.exports = function createHub(ctx) {
   }
 
   function renderEps() {
-    var from = blockIndex * BLOCK, to = Math.min(from + BLOCK, EPISODES.length);
+    var eps = epsActive();
+    var from = blockIndex * BLOCK, to = Math.min(from + BLOCK, eps.length);
     var html = '';
     for (var i = from; i < to; i++) {
-      var e = EPISODES[i];
+      var e = eps[i];
       var dot = LANG_DOT_MAP[e.lang] || LANG_DOT_MAP.sub;
       html += '<div class="ep" data-n="' + e.n + '" data-url="' + encodeURIComponent(e.url) + '">' +
         '<span class="dot" style="background:' + dot + '"></span>' + e.n + '</div>';
@@ -432,6 +515,97 @@ module.exports = function createHub(ctx) {
     });
   }
   var LANG_DOT_MAP = ${JSON.stringify(LANG_DOT)};
+
+  /* ---------- v7.0 (H3) · TEMPORADAS (AnalysisResourceData) --------
+     El episodio activo se busca SIEMPRE en la temporada activa: sin
+     análisis → la lista plana EPISODES; con análisis → la temporada
+     elegida. NUNCA lanza: cualquier forma rara se ignora. */
+  function epsActive() {
+    if (SEASONS.length && SEASONS[currentSeason] && SEASONS[currentSeason].episodes) {
+      return SEASONS[currentSeason].episodes;
+    }
+    return EPISODES;
+  }
+  function normSeasons(raw) {
+    try {
+      var arr = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+      if (!arr || typeof arr !== 'object') return [];
+      var list = Array.isArray(arr) ? arr : (arr.seasons || []);
+      if (!Array.isArray(list)) return [];
+      var out = [];
+      for (var i = 0; i < list.length && out.length < 40; i++) {
+        var s = list[i] || {};
+        var eps = [];
+        var ea = s.episodes || [];
+        for (var j = 0; j < ea.length && eps.length < 1500; j++) {
+          var e = ea[j] || {};
+          var eu = String(e.url || '');
+          if (eu.indexOf('http') !== 0) continue;
+          // Nº real desde el campo n, del título («Episodio 1122») o por orden.
+          var tn = (String(e.title || e.text || '').match(/(\d{1,4})/) || [])[0];
+          var n = Number(e.n || tn || (j + 1)) | 0;
+          if (n < 1) n = j + 1;
+          eps.push({ n: n, url: eu, text: String(e.title || e.text || ('Episodio ' + n)).slice(0, 60), lang: e.lang || CURRENT_LANG });
+        }
+        if (!eps.length) continue;
+        out.push({
+          id: String(s.id || ('s' + (out.length + 1))),
+          title: String(s.title || ('Temporada ' + (out.length + 1))).slice(0, 60),
+          isActive: !!s.isActive,
+          episodes: eps
+        });
+      }
+      return out;
+    } catch (e) { return []; }
+  }
+  function renderSeasonChips() {
+    var box = $('seasons');
+    if (!box) return;
+    if (SEASONS.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    var html = '';
+    for (var i = 0; i < SEASONS.length; i++) {
+      html += '<span class="chip' + (i === currentSeason ? ' on' : '') + '" data-i="' + i + '">' +
+        esc(SEASONS[i].title) + ' · ' + SEASONS[i].episodes.length + '</span>';
+    }
+    box.innerHTML = html;
+    box.style.display = 'flex';
+    Array.prototype.forEach.call(box.children, function (chip) {
+      chip.onclick = function () { switchSeason(Number(chip.getAttribute('data-i'))); };
+    });
+  }
+  function applySeasons(list, fromNative) {
+    if (!list || list.length < 1) return false;
+    // Solo adopta temporadas si aportan MÁS estructura que lo actual
+    // (1 sola temporada igual que la plana no vale la pena).
+    if (list.length < 2 && EPISODES.length && list[0].episodes.length <= EPISODES.length) return false;
+    SEASONS = list;
+    var act = -1;
+    for (var i = 0; i < list.length; i++) if (list[i].isActive) { act = i; break; }
+    currentSeason = act >= 0 ? act : 0;
+    blockIndex = 0;
+    renderSeasonChips();
+    renderBlocks();
+    renderEps();
+    post({
+      type: 'seasons',
+      seasons: list.map(function (s, i) {
+        return { id: s.id, title: s.title, isActive: i === currentSeason };
+      }),
+      from: fromNative ? 'analyzer-app' : 'analyzer-server'
+    });
+    return true;
+  }
+  /* El análisis del SERVER (arranque) — GET /api/v1/hub/analyze?u=…  */
+  function loadSeasons() {
+    if (seasonsTried || !PAGE_URL) return;
+    seasonsTried = true;
+    try {
+      api('/api/v1/hub/analyze?u=' + encodeURIComponent(PAGE_URL)).then(function (r) {
+        if (!r || !r.ok || !r.data) return;
+        applySeasons(normSeasons(r.data), false);
+      }).catch(function () {});
+    } catch (e) {}
+  }
 
   /* ---------- chips de fuentes/servidores (ServerDomainWebData) --- */
   function renderServers() {
@@ -467,15 +641,123 @@ module.exports = function createHub(ctx) {
     return '/hub/watch' + qs;
   }
   function switchSource(i) {
-    if (!SOURCES.length) return;
+    if (!SOURCES.length) return false;
     i = Math.max(0, Math.min(SOURCES.length - 1, i | 0));
-    if (i === currentServer) return;
+    if (i === currentServer) return false;
     location.replace(watchUrlFor(i));
+    return true;
+  }
+  /* v7.0 (H2) · selector de CALIDAD: chips por espejo etiquetado. En la
+     app re-emite el MISMO contrato 'play' con la URL del espejo elegido
+     (el reproductor nativo lo recibe como un play normal); en navegador
+     puro cambia el src del <video>. */
+  function renderQuality() {
+    var box = $('quality');
+    if (!box) return;
+    if (QUALITIES.length < 2) { box.style.display = 'none'; return; }
+    var html = '';
+    QUALITIES.forEach(function (q, i) {
+      html += '<span class="chip' + (i === qCur ? ' on' : '') +
+        '" data-i="' + i + '">' + esc(q.label) + '</span>';
+    });
+    box.innerHTML = html;
+    box.style.display = 'flex';
+    Array.prototype.forEach.call(box.children, function (chip) {
+      chip.onclick = function () { switchQuality(Number(chip.getAttribute('data-i'))); };
+    });
+  }
+  function switchQuality(i) {
+    if (!QUALITIES.length) return false;
+    i = Math.max(0, Math.min(QUALITIES.length - 1, i | 0));
+    if (i === qCur) return false;
+    var q = QUALITIES[i];
+    if (!q || !q.url) return false;
+    qCur = i;
+    renderQuality();
+    if (hasNative && CURRENT_PLAY) {
+      var p = {};
+      for (var k in CURRENT_PLAY) p[k] = CURRENT_PLAY[k];
+      p.url = q.url;
+      p.isIframe = !!q.isIframe;
+      p.quality = q.label;
+      post(p);
+      setStatus('Cambiando a ' + q.label + '…', true);
+    } else {
+      playInline({ url: q.url, mirrors: [] });
+      setStatus('Calidad: ' + q.label, true);
+    }
+    return true;
   }
   window.quan = {
     version: ${JSON.stringify(HUB_VERSION)},
-    switchSource: switchSource,
-    openEpisode: function (n) { openEpisode(n); },
+    /* v7.0 (H3) · CONTRATO COMPLETO quan.* (espejo Loklok, beans H1):
+       switchEpisode · switchSeason · switchQuality · switchSource ·
+       switchSubtitle · pauseVideo (nativo → H5) + RESPUESTA
+       js-response {code, uuid, value} (H5 → nativo, espejo
+       quan_function.postMessage). El uuid llega como ÚLTIMO argumento. */
+    switchSource: function (i, uuid) {
+      var r = switchSource(Number(i) | 0);
+      respond(uuid, r ? 0 : 1, { source: Number(i) | 0, switched: !!r });
+    },
+    switchEpisode: function (n, uuid) {
+      var ep = Number(n) || 0;
+      var ok = openEpisode(ep);
+      respond(uuid, ok ? 0 : 1, { episode: ep, opened: !!ok });
+    },
+    switchQuality: function (i, uuid) {
+      var ok = switchQuality(Number(i) | 0);
+      respond(uuid, ok ? 0 : 1, { quality: Number(i) | 0, applied: !!ok });
+    },
+    /* v7.0 (H3) · switchSeason REAL: con temporadas del analizador
+       cambia en local (sin recargar datos) y responde; sin ellas
+       responde honesto (seasons: 0) — jamás finge. */
+    switchSeason: function (s, uuid) {
+      var idx = Number(s) | 0;
+      if (SEASONS.length) {
+        idx = Math.max(0, Math.min(SEASONS.length - 1, idx));
+        currentSeason = idx;
+        blockIndex = 0;
+        renderSeasonChips();
+        renderBlocks();
+        renderEps();
+        var cur = SEASONS[idx];
+        post({ type: 'season', value: idx, title: cur.title, total: cur.episodes.length });
+        respond(uuid, 0, { season: idx, title: cur.title, episodes: cur.episodes.length });
+      } else {
+        post({ type: 'season', value: idx });
+        respond(uuid, 1, { season: idx, seasons: 0 });
+      }
+    },
+    switchSubtitle: function (t, uuid) {
+      // H3 honesto: los subtítulos del Hub se conectan en H6 (el
+      // contrato ya existe en HubContracts.kt); hoy se informa Y responde.
+      var name = (t == null) ? '' : String(t);
+      post({ type: 'subtitle', value: name });
+      respond(uuid, 0, { subtitle: name, connected: false });
+    },
+    pauseVideo: function (uuid) {
+      var v = document.querySelector('#playerBox video');
+      var paused = false;
+      if (v) { try { v.pause(); paused = true; } catch (e) {} }
+      post({ type: 'paused', by: 'native' });
+      respond(uuid, 0, { paused: paused });
+    },
+    /* v7.0 (H3) · FALLBACK CERO CAÍDAS: la APP analizó la página de
+       origen con SU ResourceAnalyzer (asset resourceAnalysis.html +
+       /api/v1/config/analyzer.js) y entrega el AnalysisResourceData —
+       la página lo adopta (chips de temporada incluidos). */
+    onAnalyzerSeasons: function (json, uuid) {
+      var list = normSeasons(json);
+      var ok = applySeasons(list, true);
+      setStatus(ok ? 'El analizador de la app encontró ' + list.length +
+        ' temporada(s) — ya están en la página.' : 'El análisis no aportó temporadas.', ok);
+      respond(uuid, ok ? 0 : 1, { seasons: list.length, applied: ok });
+    },
+    openEpisode: function (n, uuid) {
+      var ok = openEpisode(Number(n) || 0);
+      respond(uuid, ok ? 0 : 1, { episode: Number(n) || 0, opened: !!ok });
+    },
+    seasons: function () { return SEASONS.length; },
     servers: function () { return SOURCES.length; },
     /* v4.1 (FASE D1) · CERO CAÍDAS: el reproductor nativo agotó los espejos
        de ESTA fuente → cambiar a la siguiente del MISMO IDIOMA y re-abrir
@@ -487,9 +769,10 @@ module.exports = function createHub(ctx) {
 
   /* ---------- resolver + reproducir ------------------------------- */
   function openEpisode(n) {
+    var eps = epsActive();
     var ep = null;
-    for (var i = 0; i < EPISODES.length; i++) if (EPISODES[i].n === n) { ep = EPISODES[i]; break; }
-    if (!ep) return;
+    for (var i = 0; i < eps.length; i++) if (eps[i].n === n) { ep = eps[i]; break; }
+    if (!ep) return false;
     setStatus('Resolviendo episodio ' + n + '…', true);
     post({ type: 'resolving', episode: n, title: TITLE });
     api('/api/resolve', {
@@ -505,7 +788,7 @@ module.exports = function createHub(ctx) {
         setStatus('Ningún servidor de video respondió para el episodio ' + n + '. Probando otra fuente…', true);
         post({ type: 'error', message: 'sin-espejos', episode: n });
         autoNextSource(n);
-        return;
+        return true;
       }
       var label = 'E' + n + (ep.lang ? ' · ' + ep.lang : '') + ' · ' + HOST;
       var payload = {
@@ -522,9 +805,19 @@ module.exports = function createHub(ctx) {
           return { url: m.url, server: m.server || '', quality: m.quality || '', isIframe: !!m.isIframe, lang: m.lang || ep.lang || CURRENT_LANG };
         })
       };
+      // v7.0 (H2) · chips de CALIDAD: Auto (el mejor) + espejos etiquetados
+      // con quality (los que la resolución logró etiquetar).
+      CURRENT_PLAY = payload;
+      qCur = 0;
+      QUALITIES = [{ label: 'Auto', url: best.url, isIframe: !!best.isIframe }]
+        .concat((r.mirrors || []).filter(function (m) { return m && m.url; }).map(function (m, j) {
+          return { label: m.quality || ('Espejo ' + (j + 1)), url: m.url, isIframe: !!m.isIframe };
+        }));
+      renderQuality();
       var handled = post(payload);
       if (!handled) playInline(payload);   // modo navegador puro
       else setStatus('Reproduciendo en el reproductor de AniMax…', true);
+      return true;
     }).catch(function (e) {
       setStatus('Error de red al resolver: ' + e + '. Probando otra fuente…', false);
       post({ type: 'error', message: String(e), episode: n });
@@ -608,6 +901,12 @@ module.exports = function createHub(ctx) {
     setStatus('Esta fuente no expuso episodios.', false);
   }
 
+  // v7.0 (H3) · TEMPORADAS REALES: se pide al servidor el análisis de la
+  // página de origen (mismo script que /api/v1/config/analyzer.js). Si
+  // el server falla, la APP puede alimentarlas luego vía
+  // quan.onAnalyzerSeasons (ResourceAnalyzer local — CERO CAÍDAS).
+  loadSeasons();
+
   // jsonBody inicial (espejo del flujo de Seekee: la H5 anuncia estado).
   post({
     type: 'ready',
@@ -625,8 +924,8 @@ module.exports = function createHub(ctx) {
   });
   post({
     type: 'episodes',
-    total: EPISODES.length,
-    episodes: EPISODES.map(function (e) {
+    total: epsActive().length,
+    episodes: epsActive().map(function (e) {
       return { n: e.n, text: e.text, lang: e.lang };
     })
   });
@@ -635,13 +934,331 @@ module.exports = function createHub(ctx) {
      fuente automático (autoNextSource guardó el episodio), re-abrimos
      SOLITO ese episodio en la fuente nueva — el usuario solo ve "probando
      otra fuente…" y el capítulo arranca. */
-  if (AUTO_EP > 0 && EPISODES.some(function (e) { return e.n === AUTO_EP; })) {
+  if (AUTO_EP > 0 && epsActive().some(function (e) { return e.n === AUTO_EP; })) {
     setTimeout(function () {
       try { openEpisode(AUTO_EP); } catch (e) {}
     }, 600);
   }
 })();
 </script>
+</body>
+</html>`;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     v7.0 (H2) · GATE HONESTO «solo AniMax» — espejo del token= de
+     Loklok, pero SIN ENGAÑOS: sin X-Api-Key/?key= válida la página dice
+     abiertamente que se abre dentro de AniMax (no finge contenido).
+     ───────────────────────────────────────────────────────────────── */
+  function gateAllowed(req, parsed) {
+    if (!API_KEY) return true;                       // servidor personal → abierto
+    const h = String((req && req.headers && req.headers['x-api-key']) || '');
+    if (h === API_KEY) return true;                  // la app (header del WebView)
+    const k = String((parsed && parsed.searchParams.get('key')) || '');
+    return k === API_KEY;                            // enlaces internos ?key=…
+  }
+
+  function renderGate() {
+    return pageHead('AniMax · Contenido solo en la app') + `
+<body>
+<div class="wrap" style="text-align:center;padding-top:64px">
+  <div style="font-size:58px;margin:8px 0 4px">🎬</div>
+  <h2 style="margin:0 0 10px;font-size:21px">Abre este contenido dentro de AniMax</h2>
+  <p style="color:${C.text2};font-size:13.5px;line-height:1.7;max-width:430px;margin:0 auto 16px">
+    Esta página es <b style="color:${C.text}">una página propia del Hub de AniMax</b>,
+    servida por el servidor privado de tu app: sin anuncios, con el puente
+    nativo y con el reproductor de la aplicación.</p>
+  <div class="badge own" style="margin:0 0 26px">Gate honesto · ${htmlEscape(HUB_VERSION)}</div>
+  <p style="color:${C.muted};font-size:12px;line-height:1.7;max-width:430px;margin:0 auto">
+    ¿Eres el dueño del servidor? En AniMax entra a <b>Ajustes → Servidor</b> y
+    define esta misma URL y la API key: la app abre el contenido enviando
+    <b>X-Api-Key</b> (los enlaces internos viajan con ?key=).</p>
+</div>
+</body>
+</html>`;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     v7.0 (H2) · PORTAL (/hub) — el «tiktik.pro» de AniMax:
+     estrenos de temporada, tendencias, teatros, top-10 y géneros.
+     Datos del MISMO filmCenter que la app (AniList/TMDB vía ctx.hubPortal).
+     Toda sección con guard: si una fuente falla, la sección desaparece
+     — NUNCA lanza, jamás portal en blanco.
+     ───────────────────────────────────────────────────────────────── */
+  async function safe(fn, fb) {
+    try { const r = await fn(); return r == null ? fb : r; } catch { return fb; }
+  }
+
+  /* meta crudo (catalogPage) → tarjeta de póster del portal */
+  function cardOf(m) {
+    return {
+      filmId: String((m && m.id) || ''),
+      title: (m && m.title) || '',
+      cover: (m && (m.image || m.banner)) || '',
+      rating: String((m && m.score) || ''),
+      year: String((m && m.year) || '')
+    };
+  }
+
+  function posterCard(f, keyQs) {
+    if (!f || !f.title) return '';
+    const href = '/hub/detail?filmId=' + encodeURIComponent(f.filmId || '') +
+      '&t=' + encodeURIComponent(f.title || '') + keyQs;
+    return `<a class="pcard" href="${htmlEscape(href)}">` +
+      (f.cover ? `<img src="${htmlEscape(f.cover)}" alt="" loading="lazy">` : '<div class="ph"></div>') +
+      `<b>${htmlEscape(String(f.title).slice(0, 44))}</b>` +
+      `<span>${htmlEscape(f.year || '')}${f.rating ? ' · ★' + htmlEscape(f.rating) : ''}</span>` +
+      '</a>';
+  }
+
+  function posterRow(title, list, keyQs, moreHref) {
+    if (!list || !list.length) return '';
+    return `<div class="sect"><b>${htmlEscape(title)}</b>` +
+      (moreHref ? `<a href="${htmlEscape(moreHref)}">Ver todo →</a>` : '') +
+      `</div><div class="grid">${list.map(f => posterCard(f, keyQs)).join('')}</div>`;
+  }
+
+  async function renderPortal(keyParam) {
+    const keyQs = keyParam ? '&key=' + encodeURIComponent(keyParam) : '';
+
+    const [trend, estrenos, movies, series, genres, rank] = await Promise.all([
+      safe(() => portal.catalogPage ? portal.catalogPage({ code: 'comic', page: 1, pageSize: 12, orderType: 'trending' }) : null, null),
+      safe(() => portal.catalogPage ? portal.catalogPage({ code: 'comic', page: 1, pageSize: 12, orderType: 'trending', year: YEAR_NOW }) : null, null),
+      safe(() => portal.catalogPage ? portal.catalogPage({ code: 'movie', page: 1, pageSize: 12, orderType: 'popularity' }) : null, null),
+      safe(() => portal.catalogPage ? portal.catalogPage({ code: 'drama', page: 1, pageSize: 12, orderType: 'popularity' }) : null, null),
+      safe(() => portal.popularGenres ? portal.popularGenres() : [], []),
+      safe(() => ctx.hotTab ? ctx.hotTab('anime') : [], [])
+    ]);
+
+    /* Teatros del portal (espejo del filmCenter de Seekee) */
+    const theaters = [
+      { code: 'comic', name: 'Anime' },
+      { code: 'movie', name: 'Películas' },
+      { code: 'drama', name: 'Series' },
+      { code: 'short', name: 'Doramas' }
+    ];
+    const theaterChips = `<div class="chips">` + theaters.map(t =>
+      `<a class="chip" href="/hub/theater?stream=${t.code}${keyQs}">${t.name}</a>`).join('') + `</div>`;
+
+    const hero = (trend && trend.list && trend.list[0]) || null;
+    const heroHtml = hero ? `<div class="hero">` +
+      ((hero.banner || hero.image) ? `<img src="${htmlEscape(hero.banner || hero.image)}" alt="" onerror="this.remove()">` : '') +
+      `<div class="over">
+        <span class="badge own">Estreno destacado</span>
+        <h2>${htmlEscape(hero.title || '')}</h2>
+        <div>
+          ${hero.year ? `<span class="badge">${htmlEscape(String(hero.year))}</span>` : ''}
+          ${hero.score ? `<span class="badge">★ ${htmlEscape(String(hero.score))}</span>` : ''}
+          <a class="badge own" href="/hub/detail?filmId=${encodeURIComponent(String(hero.id || ''))}&t=${encodeURIComponent(hero.title || '')}${keyQs}">Ver ficha →</a>
+        </div>
+      </div>
+    </div>` : '';
+
+    const rankChips = `<div class="chips">` + ((rank || []).slice(0, 10).map((it, i) =>
+      `<a class="chip" href="/hub/detail?t=${encodeURIComponent(it.title || '')}${keyQs}">${i + 1}. ${htmlEscape(String(it.title || '').slice(0, 32))}</a>`
+    ).join('') || '<span class="badge">El ranking aún se está calentando</span>') + `</div>`;
+
+    const genreChips = `<div class="chips">` + ((genres || []).slice(0, 12).map(g =>
+      `<a class="chip" href="/hub/theater?stream=comic&genre=${encodeURIComponent(g.label || '')}${keyQs}">${htmlEscape(g.name || '')}</a>`
+    ).join('') || '<span class="badge">Géneros no disponibles ahora</span>') + `</div>`;
+
+    const keyTheater = (code) => '/hub/theater?stream=' + code + (keyParam ? '&key=' + encodeURIComponent(keyParam) : '');
+
+    return pageHead('AniMax Hub · Anime, Películas, Series y Doramas') + `
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="logo">🎬</div>
+    <h1>AniMax Hub<small>Portal propio · Anime · Películas · Series · Doramas</small></h1>
+  </div>
+  <form action="/hub" method="get" style="margin:0">
+    ${keyParam ? `<input type="hidden" name="key" value="${htmlEscape(keyParam)}">` : ''}
+    <input type="search" name="q" placeholder="Buscar animes, películas, series…" autocomplete="off">
+  </form>
+
+  <div class="sect" style="margin-top:18px"><b>Teatros</b><span class="badge own">FASE H2 · portal propio</span></div>
+  ${theaterChips}
+
+  ${heroHtml}
+
+  ${posterRow('Estrenos de temporada ' + YEAR_NOW, ((estrenos && estrenos.list) || []).slice(0, 12).map(cardOf), keyQs)}
+  ${posterRow('Tendencias ahora', ((trend && trend.list) || []).slice(0, 12).map(cardOf), keyQs)}
+  ${posterRow('Películas del momento', ((movies && movies.list) || []).slice(0, 12).map(cardOf), keyQs, keyTheater('movie'))}
+  ${posterRow('Series del momento', ((series && series.list) || []).slice(0, 12).map(cardOf), keyQs, keyTheater('drama'))}
+
+  <div class="sect"><b>Top 10 · los más buscados</b><span>en vivo</span></div>
+  ${rankChips}
+
+  <div class="sect"><b>Géneros populares</b><span>catálogo AniList</span></div>
+  ${genreChips}
+
+  <div class="foot">
+    AniMax Hub ${HUB_VERSION} · portal servido por tu servidor privado con los datos del
+    MISMO filmCenter que la app (AniList/TMDB) — el modelo de plataforma propia de
+    Seekee/Loklok: catálogo propio + páginas propias + puente nativo.
+  </div>
+</div>
+</body>
+</html>`;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     v7.0 (H2) · TEATRO (/hub/theater) — grid del filmCenter con
+     orden, género y paginación (el mismo contrato que la app consume
+     vía film/subPage — aquí servido como página propia).
+     ───────────────────────────────────────────────────────────────── */
+  async function renderTheater(stream, order, genre, page, keyParam) {
+    const keyQs = keyParam ? '&key=' + encodeURIComponent(keyParam) : '';
+    const data = await safe(() => portal.theaterPage
+      ? portal.theaterPage(stream, order, (genre && genre !== 'all') ? genre : null, page, 24, null, null)
+      : null, null);
+    if (!data || !Array.isArray(data.filmCardList)) {
+      return pageHead('Teatro · AniMax Hub') + `<body><div class="wrap">
+        <div class="err">El catálogo no respondió para este teatro. Espera un momento y recarga — el servidor reintenta solo.</div>
+        <a class="chip" href="/hub${keyQs}">← Volver al portal</a></div></body></html>`;
+    }
+    const linkFor = (o, g, pg) => '/hub/theater?stream=' + encodeURIComponent(data.streamCode || stream) +
+      '&order=' + encodeURIComponent(o || order) +
+      (g ? '&genre=' + encodeURIComponent(g) : '') +
+      (pg > 1 ? '&page=' + pg : '') + keyQs;
+    const orderChips = `<div class="chips">` + (data.orderTypeList || []).map(o =>
+      `<a class="chip${o.orderType === order ? ' on' : ''}" href="${htmlEscape(linkFor(o.orderType, genre, 1))}">${htmlEscape(o.orderTypeName)}</a>`).join('') + `</div>`;
+    const genreChips = `<div class="chips">` +
+      `<a class="chip${!genre ? ' on' : ''}" href="${htmlEscape(linkFor(order, '', 1))}">Todos</a>` +
+      (data.genreList || []).map(g =>
+        `<a class="chip${g.genreCode === genre ? ' on' : ''}" href="${htmlEscape(linkFor(order, g.genreCode, 1))}">${htmlEscape(g.genreName)}</a>`).join('') + `</div>`;
+    const pager = `<div class="pager">` +
+      (page > 1 ? `<a href="${htmlEscape(linkFor(order, genre, page - 1))}">← Anterior</a>` : '') +
+      (!data.isLast ? `<a href="${htmlEscape(linkFor(order, genre, page + 1))}">Siguiente →</a>` : '') +
+      `</div>`;
+    return pageHead(data.streamName + ' · AniMax Hub') + `
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="logo">🎬</div>
+    <h1>${htmlEscape(data.streamName)}<small>${htmlEscape(data.description || '')}</small></h1>
+  </div>
+  <div class="sect"><b>Ordenar</b><span>${data.totalFilms || 0} obras</span></div>
+  ${orderChips}
+  <div class="sect"><b>Género</b><span></span></div>
+  ${genreChips}
+  <div class="grid" style="margin-top:14px">${(data.filmCardList || []).map(f => posterCard(f, keyQs)).join('')}</div>
+  ${pager}
+  <div class="foot"><a href="/hub${keyQs}">← Portal AniMax</a> · AniMax Hub ${HUB_VERSION}</div>
+</div>
+</body>
+</html>`;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     v7.0 (H2) · FICHA UNIFICADA (/hub/detail) — para el CATÁLOGO
+     (filmId de AniList/tmdb o título) y para SITIOS EXTERNOS (u).
+     La misma página que produce el hubUrl que el server llena en las
+     tarjetas de búsqueda (fillHubUrls en v4-api.js).
+     ───────────────────────────────────────────────────────────────── */
+  async function renderDetail(p) {
+    const keyQs = p.key ? '&key=' + encodeURIComponent(p.key) : '';
+
+    /* 1) CATÁLOGO: filmDetail (filmId AniList / tmdb-{movie|tv}-{id} o título).
+       v7.0 (H2) · si viene ?u= externa, esa manda (el título t= es solo
+       la etiqueta de la ficha externa — NO una búsqueda de catálogo). */
+    if ((p.filmId || p.t) && !/^https?:/i.test(p.u || '')) {
+      const cat = await safe(() => portal.filmDetail ? portal.filmDetail(p.filmId || p.t, null) : null, null);
+      if (cat && cat.title) {
+        const meta = [];
+        if (cat.year) meta.push(htmlEscape(String(cat.year)) + (cat.endYear ? '–' + htmlEscape(String(cat.endYear)) : ''));
+        if (cat.format) meta.push(htmlEscape(cat.format));
+        if (cat.episodes) meta.push(cat.episodes + ' eps');
+        if (cat.duration) meta.push(cat.duration + ' min');
+        if (cat.seasons > 1) meta.push(cat.seasons + ' temporadas');
+        if (cat.rated) meta.push(htmlEscape(String(cat.rated)));
+        const simHtml = (cat.similar || []).length
+          ? `<div class="sect"><b>Similares</b><span>del mismo género</span></div>
+             <div class="grid">${cat.similar.map(f => posterCard(f, keyQs)).join('')}</div>`
+          : '';
+        const trailer = (cat.jikan && cat.jikan.trailerUrl)
+          ? `<p style="margin:12px 0 0"><a href="${htmlEscape(cat.jikan.trailerUrl)}">▶ Tráiler (YouTube)</a></p>` : '';
+        return pageHead(cat.title + ' · AniMax Hub') + `
+<body>
+<div class="wrap">
+  <div class="hero">
+    ${(cat.banner || cat.cover) ? `<img src="${htmlEscape(cat.banner || cat.cover)}" alt="" onerror="this.remove()">` : ''}
+    <div class="over">
+      <span class="badge own">Catálogo AniMax</span>
+      <h2>${htmlEscape(cat.title)}</h2>
+    </div>
+  </div>
+  <div class="detail">
+    ${cat.cover ? `<img src="${htmlEscape(cat.cover)}" alt="">` : ''}
+    <div class="info">
+      <div class="meta">${cat.score ? `<span class="score">★ ${htmlEscape(String(cat.score))}</span> · ` : ''}${meta.join(' · ')}</div>
+      <div class="chips" style="margin:8px 0 0">${(cat.genres || []).slice(0, 5).map(g => `<span class="chip">${htmlEscape(g)}</span>`).join('')}</div>
+    </div>
+  </div>
+  <p class="syn">${htmlEscape((cat.synopsis || 'Sin sinopsis disponible.').slice(0, 900))}</p>
+  ${trailer}
+  <a class="big" style="margin-top:14px" href="/hub?q=${encodeURIComponent(cat.title)}${keyQs}">Buscar dónde ver →</a>
+  ${simHtml}
+  <div class="foot"><a href="/hub${keyQs}">← Portal AniMax</a> · AniMax Hub ${HUB_VERSION}</div>
+</div>
+</body>
+</html>`;
+      }
+      /* Honestidad: el catálogo no resolvió la obra → página honesta
+         con buscador, jamás un 404 pelado. */
+      return pageHead('Obra no encontrada · AniMax Hub') + `<body><div class="wrap">
+        <div class="err">No encontramos «${htmlEscape(p.filmId || p.t)}» en el catálogo.</div>
+        <form action="/hub" method="get">
+          ${p.key ? `<input type="hidden" name="key" value="${htmlEscape(p.key)}">` : ''}
+          <input type="search" name="q" placeholder="Buscar en la web de fuentes…" autocomplete="off">
+        </form>
+      </div></body></html>`;
+    }
+
+    /* 2) EXTERNO: página real (u) → episodios resueltos EN EL SERVIDOR */
+    const host = hostOf(p.u) || '';
+    const title = p.t || host;
+    let eps = 0; let epsErr = '';
+    try {
+      const list = await ctx.buildEpisodes(p.u);
+      eps = (list && list.episodes) ? list.episodes.length : 0;
+      if (!eps) epsErr = (list && list.error === 'no-page')
+        ? 'La página de origen no respondió (¿dominio caído?). Aún puedes intentar reproducir.'
+        : 'Esta fuente no expuso episodios legibles. Aún puedes intentar reproducir.';
+    } catch { epsErr = 'No se pudo leer la página de origen. Aún puedes intentar reproducir.'; }
+    const srcB64 = encodeSources(p.src || []);
+    const watchHref = '/hub/watch?u=' + encodeURIComponent(p.u) +
+      '&t=' + encodeURIComponent(title) +
+      (p.c ? '&c=' + encodeURIComponent(p.c) : '') +
+      (srcB64 ? '&src=' + srcB64 : '') + keyQs;
+    const srcChips = (p.src || []).length
+      ? `<div class="sect"><b>Fuentes por idioma</b><span>latino primero</span></div><div class="chips">` +
+        p.src.map(s => `<span class="chip"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${LANG_DOT[s.g] || C.muted};margin-right:6px"></span>${htmlEscape(s.n || hostOf(s.u) || '')}${s.l ? ' · ' + htmlEscape(s.l) : ''}</span>`).join('') +
+        `</div>`
+      : '';
+    return pageHead(title + ' · AniMax Hub') + `
+<body>
+<div class="wrap">
+  <div class="hero">
+    ${p.c ? `<img src="${htmlEscape(p.c)}" alt="" onerror="this.remove()">` : ''}
+    <div class="over">
+      <span class="badge own">Página propia · fuente externa</span>
+      <h2>${htmlEscape(title)}</h2>
+      <div>
+        <span class="badge">${htmlEscape(host)}</span>
+        ${eps ? `<span class="badge">${eps} episodios</span>` : ''}
+      </div>
+    </div>
+  </div>
+  ${srcChips}
+  ${epsErr ? `<div class="err">${htmlEscape(epsErr)}</div>` : ''}
+  <a class="big" style="margin-top:14px" href="${htmlEscape(watchHref)}">Ver ahora en AniMax →</a>
+  <div class="foot">
+    La ficha unificada sirve para catálogo y fuentes externas: mismo portal,
+    mismo puente AnimaxHub — espejo de la ficha H5 de Seekee.<br>
+    <a href="/hub${keyQs}">← Portal AniMax</a> · AniMax Hub ${HUB_VERSION}
+  </div>
+</div>
 </body>
 </html>`;
   }
@@ -659,10 +1276,45 @@ module.exports = function createHub(ctx) {
     };
 
     try {
+      /* v7.0 (H2) · GATE HONESTO «solo AniMax»: con ANIMAX_API_KEY activa,
+         las páginas solo abren con X-Api-Key (header de la app) o ?key=.
+         Sin clave NO hay 401 JSON: PORTADA HONESTA de «ábrelo dentro de
+         AniMax» (index.js ya NO intercepta /hub* con el gate global).
+         /hub/version queda abierta (JSON de versión, sin contenido). */
+      if (path !== '/hub/version' && !gateAllowed(req, parsed)) {
+        return send(200, renderGate()), true;
+      }
+
       if (path === '/hub') {
         const q = (parsed.searchParams.get('q') || '').trim();
         const key = parsed.searchParams.get('key') || '';
+        // v7.0 (H2): sin q → PORTAL (estrenos/tendencias/teatros/rankings);
+        // con q → búsqueda unificada propia (renderHome, D0.5).
+        if (!q) return send(200, await renderPortal(key)), true;
         return send(200, await renderHome(q, key)), true;
+      }
+
+      if (path === '/hub/theater') {
+        const stream = (parsed.searchParams.get('stream') || 'comic').trim();
+        const order = (parsed.searchParams.get('order') || 'trending').trim();
+        const genre = (parsed.searchParams.get('genre') || '').trim();
+        const page = Math.max(1, Number(parsed.searchParams.get('page')) || 1);
+        const key = parsed.searchParams.get('key') || '';
+        return send(200, await renderTheater(stream, order, genre, page, key)), true;
+      }
+
+      if (path === '/hub/detail') {
+        const filmId = (parsed.searchParams.get('filmId') || '').trim().slice(0, 80);
+        const t = (parsed.searchParams.get('t') || '').trim().slice(0, 120);
+        const u = (parsed.searchParams.get('u') || '').trim();
+        const c = (parsed.searchParams.get('c') || '').trim();
+        const src = decodeSources(parsed.searchParams.get('src') || '');
+        const key = parsed.searchParams.get('key') || '';
+        if (!filmId && !t && !/^https?:/i.test(u)) {
+          return send(400, pageHead('Error · AniMax') +
+            '<body><div class="wrap"><div class="err">Falta ?filmId=, ?t= o ?u=http…</div></div></body></html>'), true;
+        }
+        return send(200, await renderDetail({ filmId, t, u, c, src, key })), true;
       }
 
       if (path === '/hub/watch') {
@@ -711,3 +1363,6 @@ module.exports = function createHub(ctx) {
 };
 
 module.exports.HUB_VERSION = HUB_VERSION;
+/* v7.0 (H2): mismo codec b64url (u/n/l/g) para que v4-api.js llene el
+   src= del hubUrl con la MISMA codificación que decodifica el hub. */
+module.exports.encodeSources = encodeSources;

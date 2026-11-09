@@ -1,6 +1,6 @@
 {
   "name": "animax-server",
-  "version": "4.0.0",
+  "version": "6.0.0",
   "description": "AniMax Server v4.0 — capa espejo de la API de Seekee 1.4.0 (47 endpoints, beans Gson idénticos) sobre el motor multi-fuente v3: anime latino/sub, películas, series, doramas, granja profunda, rankings, adblock, dominios frescos",
   "main": "index.js",
   "scripts": {

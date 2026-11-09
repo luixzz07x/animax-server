@@ -1,0 +1,21 @@
+{
+  "_leyeme": "FASE H4 · Dominios propios del Hub de AniMax — EDITA ESTE ARCHIVO con TUS dominios reales. Cada entrada es una WhiteListConfig del contrato Loklok (FORENSE-H §5.1): freshEnable = captura de medios habilitada, webFreshEnable = el navegador interno puede abrirlo aunque el scraper falle, desktop = UA Chrome-escritorio para ese dominio. El dominio marcado «primary»: true es el que usan las apps; si el watchdog lo ve caído 2 ciclos seguidos, activa el FAILOVER al primer mirror sano y al recuperarse vuelve solo (RESTAURACIÓN). Las apps reciben el cambio en ≤6 h SIN publicar APK (caché sp_resources_domain). Patrón mtime-cache: guardar el archivo basta, no hace falta reiniciar el servidor.",
+  "hub": [
+    {
+      "url": "https://hub.midominio1.tld",
+      "freshEnable": true,
+      "webFreshEnable": true,
+      "desktop": false,
+      "primary": true,
+      "note": "Hub principal — REMPLAZA por tu dominio real (donde corre este servidor)"
+    },
+    {
+      "url": "https://hub.midominio2.tld",
+      "freshEnable": true,
+      "webFreshEnable": true,
+      "desktop": false,
+      "primary": false,
+      "note": "Mirror de respaldo — REMPLAZA (o borra la entrada); el watchdog activa el failover si el principal cae"
+    }
+  ]
+}

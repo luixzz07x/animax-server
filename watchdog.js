@@ -19,6 +19,15 @@
                   tocar el APK (WhiteListConfig{url,freshEnable,
                   webFreshEnable} del contrato de Seekee).
 
+   v7.0 (FASE H4) · SALUD DE LOS DOMINIOS DEL HUB DEL DUEÑO + FAILOVER:
+   `hub.midominio1.tld` + mirrors (animax-hub-domains.json vía ctx.
+   hubDomains) se sondean en el MISMO ciclo (GET /hub del portal). Si el
+   dominio ACTIVO falla 2 ciclos seguidos → FAILOVER al primer mirror
+   sano; cuando el primario se recupera → RESTAURACIÓN automática. Las
+   apps lo reciben por queryFreshDomainList v2 (mapa hub/sites) en ≤6 h
+   sin tocar el APK — espejo de la rotación de sitios, ahora para el
+   Hub 2.0 (eslabón que Loklok resuelve con frentes hardcodeados).
+
    Persistencia best-effort en animax-domains.json (disco efímero en
    Render: se pierde al reiniciar, la señal se regenera sola).
    ═══════════════════════════════════════════════════════════════════ */
@@ -96,13 +105,19 @@ function matchesSite(name, candHost) {
 }
 
 module.exports = function createWatchdog(ctx) {
-  const { request, siteHealth, rawSitesCatalog, onRotate, DEBUG } = ctx;
+  const { request, siteHealth, rawSitesCatalog, onRotate, DEBUG,
+          hubDomains } = ctx;   // v7.0 (H4): dominios del Hub del dueño
 
   const log = (...a) => console.error('[watchdog]', ...a);
   const dlog = (...a) => { if (DEBUG) console.error('[watchdog:d]', ...a); };
 
   /* ── Estado persistente: siteId → datos de dominio ───────────────── */
   const state = new Map(); // id → { current, previous, changedAt, source, fails, ok, ms, lastCheck, searchOk, candidates[] }
+
+  /* v7.0 (H4) · Estado del HUB del dueño (persistido junto a los sitios):
+     active = mirror en uso · promotedFrom = de dónde vino el failover
+     · mirrors = salud por URL (fails≥2 → candidato a failover).       */
+  const hub = { active: null, promotedFrom: null, changedAt: 0, mirrors: {} };
 
   (function loadState() {
     try {
@@ -123,6 +138,22 @@ module.exports = function createWatchdog(ctx) {
           });
         }
       }
+      /* v7.0 (H4): salud del Hub sobrevive al reinicio (v3 del estado). */
+      const savedHub = data && data.hub;
+      if (savedHub && typeof savedHub === 'object') {
+        hub.active = typeof savedHub.active === 'string' ? savedHub.active : null;
+        hub.promotedFrom = savedHub.promotedFrom || null;
+        hub.changedAt = Number(savedHub.changedAt) || 0;
+        if (savedHub.mirrors && typeof savedHub.mirrors === 'object') {
+          for (const [u, m] of Object.entries(savedHub.mirrors)) {
+            if (m && typeof m === 'object') {
+              hub.mirrors[u] = { ok: !!m.ok, ms: Number(m.ms) || 0,
+                lastCheck: Number(m.lastCheck) || 0, fails: Number(m.fails) || 0 };
+            }
+          }
+        }
+        dlog('estado hub cargado: activo =', hub.active || '(primario)');
+      }
       if (state.size) dlog('estado cargado:', state.size, 'sitios');
     } catch { /* sin fichero: se empieza del catálogo */ }
   })();
@@ -131,7 +162,12 @@ module.exports = function createWatchdog(ctx) {
     try {
       const sites = {};
       for (const [id, v] of state) sites[id] = v;
-      fs.writeFileSync(STATE_FILE, JSON.stringify({ version: 2, savedAt: Date.now(), sites }));
+      /* v7.0 (H4): version 3 = sitios + estado del Hub del dueño. */
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        version: 3, savedAt: Date.now(), sites,
+        hub: { active: hub.active, promotedFrom: hub.promotedFrom,
+               changedAt: hub.changedAt, mirrors: hub.mirrors }
+      }));
     } catch { /* best-effort (disco efímero en Render) */ }
   }
 
@@ -322,6 +358,95 @@ module.exports = function createWatchdog(ctx) {
     state.set(id, st);
   }
 
+  /* ══ v7.0 (FASE H4) · SALUD DEL HUB DEL DUEÑO + FAILOVER ═══════════
+
+     El espejo del mantenimiento de sitios, aplicado al Hub 2.0:
+       1. Sondea CADA dominio/mirror del dueño (GET /hub del portal —
+          la página propia de H2; el park-check y el reto Cloudflare
+          del probeUrl reusable filtran aparcados y errores).
+       2. Si el dominio ACTIVO lleva 2 ciclos seguidos caído → FAILOVER
+          al primer mirror sano (el dueño lo ve en sources/status).
+       3. RESTAURACIÓN: si el primario vuelve a estar sano → se regresa
+          a él automáticamente (el activo nunca queda huérfano).
+     Las apps reciben el mirror vigente por queryFreshDomainList v2
+     (freshEnable del mirror caído = false + campo active) en ≤6 h. */
+
+  async function maintainHub() {
+    const cfg = typeof hubDomains === 'function' ? (hubDomains() || []) : [];
+    if (!cfg.length) { hub.active = null; return; }
+    const primary = cfg.find(h => h.primary) || cfg[0];
+    if (!hub.active) hub.active = primary.url;
+
+    // 1) SALUD de cada mirror (en tandas de 4, como los sitios).
+    for (let i = 0; i < cfg.length; i += 4) {
+      await Promise.all(cfg.slice(i, i + 4).map(async h => {
+        const st = hub.mirrors[h.url] ||
+          (hub.mirrors[h.url] = { ok: true, ms: 0, lastCheck: 0, fails: 0 });
+        const probe = await probeUrl(h.url.replace(/\/+$/, '') + '/hub',
+          { timeoutMs: 6000, maxBytes: 300 * 1024, minBody: 500 });
+        st.ok = probe.ok; st.ms = probe.ms; st.lastCheck = Date.now();
+        st.fails = probe.ok ? 0 : (st.fails || 0) + 1;
+        if (!probe.ok) dlog('hub caído:', h.url, '(fails', st.fails + ')');
+      }));
+    }
+
+    const activeSt = hub.mirrors[hub.active];
+
+    // 2) FAILOVER: activo con 2 fallos seguidos → primer mirror sano.
+    if (activeSt && activeSt.fails >= 2) {
+      const cand = cfg.find(h => h.url !== hub.active &&
+        hub.mirrors[h.url] && hub.mirrors[h.url].ok);
+      if (cand) {
+        log(`FAILOVER HUB: ${hub.active} → ${cand.url}`);
+        hub.promotedFrom = hub.active;
+        hub.active = cand.url;
+        hub.changedAt = Date.now();
+      }
+    }
+
+    // 3) RESTAURACIÓN: primario sano de nuevo → regresa el tráfico.
+    if (hub.active !== primary.url) {
+      const pSt = hub.mirrors[primary.url];
+      if (pSt && pSt.ok && pSt.fails === 0) {
+        log(`RESTAURACIÓN HUB: ${hub.active} → ${primary.url}`);
+        hub.promotedFrom = hub.active;
+        hub.active = primary.url;
+        hub.changedAt = Date.now();
+      }
+    }
+  }
+
+  /** Vista del Hub para freshDomainList v2 y sources/status (H4). */
+  function hubStatus() {
+    const cfg = typeof hubDomains === 'function' ? (hubDomains() || []) : [];
+    if (!cfg.length) {
+      return { configured: false, active: null, primary: null,
+        promotedFrom: null, changedAt: null, mirrors: [] };
+    }
+    const primary = (cfg.find(h => h.primary) || cfg[0]).url;
+    const active = hub.active || primary;
+    return {
+      configured: true,
+      active, primary,
+      promotedFrom: hub.promotedFrom || null,
+      changedAt: hub.changedAt || null,
+      mirrors: cfg.map(h => {
+        const st = hub.mirrors[h.url] || null;
+        const alive = st && st.lastCheck ? !!st.ok : true; // sin sondear → vivo
+        return {
+          url: h.url,
+          primary: h.url === primary,
+          active: active === h.url,
+          status: alive ? 'up' : 'down',
+          ok: alive,
+          ms: st ? st.ms : null,
+          lastCheck: st ? st.lastCheck : null,
+          fails: st ? (st.fails || 0) : 0
+        };
+      })
+    };
+  }
+
   /* ── Ciclo completo + temporizador ───────────────────────────────── */
 
   let running = false;
@@ -339,6 +464,8 @@ module.exports = function createWatchdog(ctx) {
       for (let i = 0; i < sites.length; i += 4) {
         await Promise.all(sites.slice(i, i + 4).map(s => maintainSite(s).catch(() => {})));
       }
+      // v7.0 (H4): salud + failover de los dominios del Hub del dueño.
+      await maintainHub().catch(() => {});
       lastRunAt = Date.now();
       log(`ciclo completo en ${Math.round((lastRunAt - t0) / 1000)}s ·` +
         ` vivos ${countUp()}/${sites.length} · rotaciones ${rotationsThisRun}`);
@@ -400,7 +527,8 @@ module.exports = function createWatchdog(ctx) {
     });
   }
 
-  /** Estado de todas las fuentes (pantalla "Estado de fuentes" de la app). */
+  /** Estado de todas las fuentes (pantalla "Estado de fuentes" de la app).
+   *  v7.0 (H4): incluye la sección `hub` (salud + mirror activo/failover). */
   function status() {
     const sites = rawSitesCatalog();
     let up = 0, down = 0, unknown = 0;
@@ -431,6 +559,7 @@ module.exports = function createWatchdog(ctx) {
     });
     return {
       sources,
+      hub: hubStatus(),   // v7.0 (H4): dominios del Hub del dueño
       summary: {
         total: sites.length, up, down, unknown,
         running,
@@ -441,5 +570,5 @@ module.exports = function createWatchdog(ctx) {
     };
   }
 
-  return { resolveSites, status, runCycle, trigger, start, intervalMs };
+  return { resolveSites, status, hubStatus, runCycle, trigger, start, intervalMs };
 };

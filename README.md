@@ -1,4 +1,4 @@
-# 🛰️ AniMax Server v4.1.0
+# 🛰️ AniMax Server v6.0.0
 
 Servidor privado de búsqueda para la app AniMax — el mismo concepto que usa
 Seekee con su backend Buscari, pero **tuyo y gratis**: el teléfono lento ya no
@@ -7,6 +7,23 @@ busca; le pregunta a este servidor y este hace el trabajo pesado.
 - **Node.js puro, CERO dependencias** (no hay nada que instalar).
 - Sin anuncios, sin VIP, sin pagos, sin recolectar nada (no guarda nada: la
   caché es en memoria y muere al reiniciar).
+
+**v6.0.0 (PLAN G · G2+G3) · PROVEEDORES REALES + ADBLOCK REFORZADO:**
+
+- `GET /api/v1/app/episode/list?q={título}&episode={n}&lang={latino|castellano|sub|any}`
+  → **una llamada = fuentes reproducibles**: proveedores reales
+  (`allanime` GraphQL + `hianime` ajax, código original en `providers.js`)
+  con fallback al motor propio v3. Embeds resueltos en profundidad,
+  HLS/MP4 validados primero, `providerErrors` de diagnóstico.
+- `POST /api/v1/app/episode/resolve` `{showRef, episode, lang}` → fuentes de
+  un show ya identificado.
+- `GET /api/v1/ai/config` → quick prompts de IA en español servidos por este
+  server (sin credenciales de terceros; el chat usa `ANIMAX_AI_URL` opcional).
+- Adblock: EasyList digerida **+ `ad_hosts` fusionado (11,290 dominios)**
+  con persistencia en disco (`data/adblock-cache.json`) para sobrevivir a
+  reinicios de Render free.
+- `GET /api/v1/config/sources/status` incluye ahora la salud de cada
+  proveedor real (`providers`).
 
 **v4.1.0 (FASE D0.5) · PÁGINAS PROPIAS UNIFICADAS (hub.js):** el servidor ahora
 **genera sus propias páginas H5** — el mismo sistema con el que Seekee muestra

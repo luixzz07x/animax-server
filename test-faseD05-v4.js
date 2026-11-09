@@ -61,22 +61,27 @@ function b64url(obj) {
     section('[A] Portada propia (/hub)');
     let r = await raw('/hub');
     check('GET /hub → 200 HTML', r.code === 200 && /text\/html/.test(r.headers.get('content-type') || ''));
-    check('Marca "AniMax Hub" + subtítulo estilo Seekee', r.body.includes('AniMax Hub') && r.body.includes('Páginas propias'));
+    // v7.0 (H2): /hub es ahora el PORTAL — subtítulo «Portal propio · …».
+    check('Marca "AniMax Hub" + subtítulo propio', r.body.includes('AniMax Hub') && r.body.includes('Portal propio'));
     check('Tema oscuro de la app (#050507 / #4f9cf9)', r.body.includes('#050507') && r.body.includes('#4f9cf9'));
     check('Buscador central', r.body.includes('type="search"'));
     check('Cero recursos externos (sin <script src=)', !/<script[^>]+src=/.test(r.body));
 
     r = await raw('/hub/version');
     const ver = JSON.parse(r.body);
-    check('/hub/version → animax-hub/1 (FASE D0.5)', r.code === 200 && /FASE D0\.5/.test(ver.hub || ''));
+    // v7.0 (H3): el hub evolucionó a bridge completo (animax-hub/3) — se exige la
+    // versión VIGENTE, no la de esta fase histórica.
+    check('/hub/version → animax-hub/3 (FASE H3)', r.code === 200 && /FASE H3/.test(ver.hub || ''));
 
     /* ── [B] BÚSQUEDA PROPIA ────────────────────────────────────────── */
     section('[B] Búsqueda propia (/hub?q=…)');
     r = await raw('/hub?q=' + encodeURIComponent('one piece'));
     const cards = (r.body.match(/class="card"/g) || []).length;
-    const watchLinks = (r.body.match(/hub\/watch\?u=/g) || []).length;
+    // v7.0 (H2): los resultados llevan a la FICHA propia (/hub/detail?u=…)
+    // que ofrece «Ver ahora» → /hub/watch — se aceptan ambas generaciones.
+    const watchLinks = (r.body.match(/hub\/(watch|detail)\?u=/g) || []).length;
     check('Renderiza tarjetas del motor agregado', r.code === 200 && cards > 0, `cards=${cards}`);
-    check('Enlaces a fichas propias /hub/watch?u=…', watchLinks > 0, `links=${watchLinks}`);
+    check('Enlaces a páginas propias (ficha/watch) ?u=…', watchLinks > 0, `links=${watchLinks}`);
     check('Encabezado con el término buscado', /para .one piece./.test(r.body) || r.body.includes('one piece'));
 
     /* ── [C] FICHA-WATCH PROPIA ─────────────────────────────────────── */
