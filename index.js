@@ -1763,6 +1763,8 @@ function cacheSet(k, v) {
    técnica de "actualización real" de Seekee, ahora en AniMax.
    ══════════════════════════════════════════════════════════════════ */
 const createWatchdog = require('./watchdog');
+/* 8.0.2 · Capa nube: fuentes/servidores/blocklist de stream actualizables. */
+const { buildCloud } = require('./cloud');
 /* v7.0 (H4): dominios propios del Hub del dueño (mtime-cache) — el
    watchdog los sondea y aplica el failover entre mirrors. */
 const hubDomains = require('./hub-domains');
@@ -2188,6 +2190,10 @@ const v4Route = createV4Api(v4Ctx);
 const createHub = require('./hub');
 const hubRoute = createHub(v4Ctx);
 
+/* 8.0.2 · CAPA NUBE (/api/cloud/*): fuentes vigentes + ServerFarm +
+   blocklist de stream — la app se actualiza sola desde aquí. */
+const cloud = buildCloud({ allSitesConfig, siteHealth, VERSION });
+
 /* ══════════════════════════════════════════════════════════════════
    17. Servidor HTTP + rutas
    ══════════════════════════════════════════════════════════════════ */
@@ -2489,6 +2495,15 @@ const server = http.createServer(async (req, res) => {
     /* NOTA v6.0 (G4): /api/v1/report/adblock vive en v4-api.js — TODO lo
        que empieza por /api/v1/ lo enruta esa capa (el router clásico no
        la ve; un 404 saldría antes de llegar aquí). */
+
+    /* ════════════════════════════════════════════════════════════════
+       8.0.2 · CAPA NUBE (/api/cloud/*) — la app se actualiza sola:
+       fuentes tier-1 vigentes, ServerFarm y blocklist de STREAM.
+       ════════════════════════════════════════════════════════════════ */
+    {
+      const handled = cloud.register(path, req, res, json);
+      if (handled) return;
+    }
 
     if (path === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
