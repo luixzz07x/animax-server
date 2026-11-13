@@ -108,7 +108,7 @@ iniciarVigilante();
 // ── Arranque ──────────────────────────────────────────────────
 const PUERTO = parseInt(process.env.PORT || "3001", 10);
 app.listen(PUERTO, () => {
-  console.log(`[animax-server v5.1] escuchando en :${PUERTO} (22 fuentes · 15 extractores · panel /panel)`);
+  console.log(`[animax-server v5.2] escuchando en :${PUERTO} (22 fuentes · 15 extractores · panel /panel)`);
 });
 
 export default app;

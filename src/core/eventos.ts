@@ -18,7 +18,8 @@ export type NombreEvento =
   | "dominio-restaurado"
   | "extractor-ok"
   | "extractor-fallo"
-  | "cache-invalidada";
+  | "cache-invalidada"
+  | "ciclo-salud";
 
 export interface CargaPeticion {
   id: string;
@@ -48,6 +49,15 @@ export interface CargaDominio {
   motivo: "manual" | "vigilante";
 }
 
+/** FIX v5.2: resumen agregado de un ciclo de salud (una línea de log). */
+export interface CargaCicloSalud {
+  total: number;
+  vivas: number;
+  bloqueadas: number;
+  muertas: number;
+  ms: number;
+}
+
 export type Cargas = {
   peticion: CargaPeticion;
   "peticion-error": CargaPeticion;
@@ -59,6 +69,7 @@ export type Cargas = {
   "extractor-ok": CargaExtractor;
   "extractor-fallo": CargaExtractor;
   "cache-invalidada": { namespace: string };
+  "ciclo-salud": CargaCicloSalud;
 };
 
 const emisor = new EventEmitter();
@@ -125,12 +136,36 @@ export function instantanea(): InstantaneaMetricas {
   };
 }
 
-/** Log por consola de los eventos clave (estilo del server original). */
+/** Log por consola de los eventos clave — ANTI-SPAM (FIX v5.2):
+ *  - "fuente-fallo": solo se loguea la TRANSICIÓN a circuito abierto o
+ *    como máximo una vez por fuente cada 10 min (antes: 20 líneas/ciclo
+ *    ×3 sistemas = cientos de líneas que ahogaban los logs de Render).
+ *  - "ciclo-salud": resumen agregado de una línea por ciclo de salud. */
+const ultimoLogFallo = new Map<string, number>();
+const INTERVALO_LOG_FALLO_MS = 10 * 60 * 1000;
+
 suscribir("fuente-fallo", (c) => {
-  console.log(`[salud] ${c.fuente} falló${c.detalle ? ` (${c.detalle})` : ""}`);
+  const transicion = (c.detalle || "").includes("circuito");
+  const previo = ultimoLogFallo.get(c.fuente) ?? 0;
+  if (transicion || Date.now() - previo > INTERVALO_LOG_FALLO_MS) {
+    if (transicion) {
+      console.log(`[salud] ${c.fuente}: CIRCUITO ABIERTO (omita ~2 min)${c.detalle ? ` · ${c.detalle}` : ""}`);
+    } else {
+      console.log(`[salud] ${c.fuente} falló${c.detalle ? ` (${c.detalle})` : ""}`);
+    }
+    ultimoLogFallo.set(c.fuente, Date.now());
+  }
+});
+suscribir("ciclo-salud", (c) => {
+  console.log(
+    `[salud] ciclo: ${c.total} fuentes · ${c.vivas} vivas · ${c.bloqueadas} bloqueadas(CF) · ${c.muertas} sin respuesta (${c.ms}ms)`
+  );
 });
 suscribir("dominio-cambiado", (c) => {
   console.log(`[dominios] ${c.fuente}: ${c.anterior} → ${c.nuevo} (${c.motivo})`);
+});
+suscribir("dominio-restaurado", (c) => {
+  console.log(`[dominios] ${c.fuente}: restaurado a ${c.nuevo} (${c.motivo})`);
 });
 suscribir("extractor-fallo", (c) => {
   console.log(`[extractores] ${c.extractor} no pudo resolver ${c.url.slice(0, 80)}`);

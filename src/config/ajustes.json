@@ -1,15 +1,15 @@
 {
-  "$comentario": "ANIMAX v5 · Ajustes de runtime del servidor (timeouts, TTLs, prioridad de extractores, rate-limit, watchdog y circuit breaker). Editable sin recompilar: se lee al arrancar.",
+  "$comentario": "ANIMAX v5.2-FIX · Ajustes de runtime AJUSTADOS PARA RENDER FREE. El plan gratuito tiene UNA CPU compartida y arranque frío: timeouts largos, sondas por lotes, circuit breaker lento y vigilante que no conmuta dominios al primer fallo. Editable sin recompilar: se lee al arrancar.",
   "servidor": {
     "puertoPorDefecto": 3001,
     "limiteBody": "1mb",
     "cacheHeadersMaxAgeSeg": 120
   },
   "timeouts": {
-    "fuenteBuscarMs": 3000,
-    "fuenteDetalleMs": 7000,
-    "extractorMs": 6000,
-    "sondaSaludMs": 5000,
+    "fuenteBuscarMs": 9000,
+    "fuenteDetalleMs": 15000,
+    "extractorMs": 8000,
+    "sondaSaludMs": 12000,
     "proxyStreamMs": 25000
   },
   "cache": {
@@ -22,7 +22,7 @@
     "limpiezaEntradas": 5000
   },
   "extractores": {
-    "prioridad": ["mp4upload", "yourupload", "streamtape", "doodstream", "voe", "okru", "m3u8", "streamwish", "filemoon", "vidmoly", "streamsb", "mega"],
+    "prioridad": ["mp4upload", "yourupload", "streamtape", "doodstream", "voe", "okru", "m3u8", "streamwish", "filemoon", "vidmoly", "streamsb", "mixdrop", "upstream", "filelions", "mega"],
     "reintentosExtractor": 1
   },
   "limites": {
@@ -31,18 +31,24 @@
     "maxPorVentanaStream": 720
   },
   "cola": {
-    "concurrenciaPorFuente": 3,
-    "concurrenciaGlobal": 24
+    "concurrenciaPorFuente": 2,
+    "concurrenciaGlobal": 12
   },
   "salud": {
-    "umbralFallos": 4,
-    "enfriamientoMs": 60000,
-    "intervaloChequeoMs": 300000
+    "umbralFallos": 6,
+    "enfriamientoMs": 120000,
+    "intervaloChequeoMs": 600000,
+    "graciaArranqueMs": 180000,
+    "loteSonda": 4,
+    "pausaLoteMs": 900
   },
   "vigilante": {
-    "intervaloMs": 600000,
-    "timeoutPruebaMs": 6000,
-    "fallosAntesDeConmutar": 2
+    "intervaloMs": 900000,
+    "timeoutPruebaMs": 12000,
+    "fallosAntesDeConmutar": 3,
+    "exitoRecienteMs": 300000,
+    "lote": 3,
+    "pausaLoteMs": 900
   },
   "reintentos": {
     "baseBackoffMs": 400,

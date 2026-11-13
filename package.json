@@ -1,6 +1,6 @@
 {
   "name": "animax-server",
-  "version": "5.1.0",
+  "version": "5.2.0",
   "description": "ANIMAX v5.1 · API multi-fuente de anime (22 fuentes scrapeadas, catálogo unificado, 15 extractores de video encadenados, proxy de streaming con CORS+Range, watchdog de dominios, circuit breaker, rate-limit, recomendaciones Jaccard, tendencias con decaimiento exponencial, programación semanal, tops, continuar-viendo y listas de usuario, panel de administración /panel y métricas Prometheus) — servidor standalone para Render/VPS",
   "private": true,
   "main": "index.ts",
