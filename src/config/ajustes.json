@@ -1,0 +1,52 @@
+{
+  "$comentario": "ANIMAX v5 · Ajustes de runtime del servidor (timeouts, TTLs, prioridad de extractores, rate-limit, watchdog y circuit breaker). Editable sin recompilar: se lee al arrancar.",
+  "servidor": {
+    "puertoPorDefecto": 3001,
+    "limiteBody": "1mb",
+    "cacheHeadersMaxAgeSeg": 120
+  },
+  "timeouts": {
+    "fuenteBuscarMs": 3000,
+    "fuenteDetalleMs": 7000,
+    "extractorMs": 6000,
+    "sondaSaludMs": 5000,
+    "proxyStreamMs": 25000
+  },
+  "cache": {
+    "buscarTtlSeg": 3600,
+    "ultimosTtlSeg": 600,
+    "detalleTtlSeg": 21600,
+    "servidoresTtlSeg": 21600,
+    "curadosTtlSeg": 21600,
+    "generosTtlSeg": 86400,
+    "limpiezaEntradas": 5000
+  },
+  "extractores": {
+    "prioridad": ["mp4upload", "yourupload", "streamtape", "doodstream", "voe", "okru", "m3u8", "streamwish", "filemoon", "vidmoly", "streamsb", "mega"],
+    "reintentosExtractor": 1
+  },
+  "limites": {
+    "ventanaMs": 60000,
+    "maxPorVentana": 240,
+    "maxPorVentanaStream": 720
+  },
+  "cola": {
+    "concurrenciaPorFuente": 3,
+    "concurrenciaGlobal": 24
+  },
+  "salud": {
+    "umbralFallos": 4,
+    "enfriamientoMs": 60000,
+    "intervaloChequeoMs": 300000
+  },
+  "vigilante": {
+    "intervaloMs": 600000,
+    "timeoutPruebaMs": 6000,
+    "fallosAntesDeConmutar": 2
+  },
+  "reintentos": {
+    "baseBackoffMs": 400,
+    "maxBackoffMs": 3200,
+    "intentos": 2
+  }
+}

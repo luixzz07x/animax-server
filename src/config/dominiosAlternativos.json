@@ -1,0 +1,25 @@
+{
+  "$comentario": "ANIMAX v5 · Dominios de respaldo por fuente (2-4). El vigilante (watchdog) los prueba cada 10 min cuando una fuente cae y cambia en caliente al primero que responda. También se pueden cambiar a mano: POST /api/v1/dominios/{fuente} {\"baseUrl\": \"...\"}.",
+  "alternativos": {
+    "animeflv": ["https://animeflv.tv", "https://animeflv.one", "https://animeflv.cc"],
+    "tioanime": ["https://tioanime.com", "https://tioanime.tv"],
+    "animefenix": ["https://animefenix.tv", "https://animefenix.net", "https://animefenix.info"],
+    "monoschinos": ["https://monoschinos.com", "https://monoschinos.net", "https://monoschinos.xyz"],
+    "jkanime": ["https://jkanime.net", "https://jkanime.tv"],
+    "animeblix": ["https://animeblix.com", "https://animeblix.net"],
+    "shuu": ["https://shuu.tv", "https://shuu.xyz"],
+    "animegratis": ["https://animegratis.net", "https://animegratis.tv"],
+    "animelatinohd": ["https://www.animelatinohd.com", "https://animelatinohd.net"],
+    "animemovil": ["https://www.animemovil.com", "https://animemovil.net", "https://animemovil.tv"],
+    "animeonline": ["https://ver2.animeonline.ninja", "https://animeonline.ninja", "https://v3.animeonline.ninja"],
+    "animedlatino": ["https://animedlatino.com", "https://animedlatino.net"],
+    "animeid": ["https://animeid.tv", "https://animeid.to", "https://animeid.xyz"],
+    "animeyt": ["https://animeyt.tv", "https://animeyt.to", "https://animeyt.cc"],
+    "animeleyend": ["https://anime-leyend.net", "https://anime-leyend.com", "https://animeleyend.net"],
+    "otakstv": ["https://otak.tv", "https://otaks.tv"],
+    "animetwilight": ["https://animetwilight.com", "https://animetwilight.net", "https://animetwilight.tv"],
+    "animeplus": ["https://animeplus.vc", "https://animeplus.tv", "https://animeplus.co"],
+    "animenova": ["https://www.animenova.org", "https://animenova.org", "https://animenova.tv"],
+    "animebuka": ["https://animebuka.com", "https://animebuka.net", "https://animebuka.tv"]
+  }
+}
