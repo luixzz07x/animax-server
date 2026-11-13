@@ -1,0 +1,39 @@
+{
+  "$comentario": "ANIMAX v5 · Config central de fuentes (22). Copia operativa de src/config/fuentes.json (los módulos nuevos leen la de src/config; registro/dedupe/http leen esta). Cambia la URL base en caliente con POST /api/v1/dominios/{fuente}.",
+  "fuentes": [
+    { "id": "animeflv", "nombre": "AnimeFLV", "baseUrl": "https://animeflv.st", "idioma": "sub", "grupo": "dual", "activo": true, "verificado": true },
+    { "id": "tioanime", "nombre": "TioAnime", "baseUrl": "https://tioanime.com", "idioma": "sub", "grupo": "dual", "activo": true, "verificado": true },
+    { "id": "animefenix", "nombre": "AnimeFenix", "baseUrl": "https://animefenix.tv", "idioma": "sub", "grupo": "sub", "activo": true },
+    { "id": "monoschinos", "nombre": "MonosChinos", "baseUrl": "https://monoschinos.com", "idioma": "dual", "grupo": "dual", "activo": true },
+    { "id": "jkanime", "nombre": "JkAnime", "baseUrl": "https://jkanime.net", "idioma": "sub", "grupo": "sub", "activo": true },
+    { "id": "animeblix", "nombre": "AnimeBlix", "baseUrl": "https://animeblix.com", "idioma": "sub", "grupo": "sub", "activo": true },
+    { "id": "shuu", "nombre": "Shuu.tv", "baseUrl": "https://shuu.tv", "idioma": "sub", "grupo": "sub", "activo": true },
+    { "id": "animegratis", "nombre": "AnimeGratis", "baseUrl": "https://animegratis.net", "idioma": "dual", "grupo": "latino", "activo": true, "verificado": true },
+    { "id": "animelatinohd", "nombre": "AnimeLatinoHD", "baseUrl": "https://www.animelatinohd.com", "idioma": "latino", "grupo": "latino", "activo": true },
+    { "id": "animemovil", "nombre": "AnimeMovil", "baseUrl": "https://www.animemovil.com", "idioma": "latino", "grupo": "latino", "activo": true },
+    { "id": "animeonline", "nombre": "AnimeOnline", "baseUrl": "https://ver2.animeonline.ninja", "idioma": "latino", "grupo": "latino", "activo": true },
+    { "id": "animedlatino", "nombre": "AnimeDLatino", "baseUrl": "https://animedlatino.com", "idioma": "dual", "grupo": "dual", "activo": true },
+    { "id": "animeid", "nombre": "AnimeID", "baseUrl": "https://animeid.tv", "idioma": "latino", "grupo": "latino", "activo": true },
+    { "id": "animeyt", "nombre": "AnimeYT", "baseUrl": "https://animeyt.tv", "idioma": "latino", "grupo": "latino", "activo": true },
+    { "id": "animeleyend", "nombre": "AnimeLeyend", "baseUrl": "https://anime-leyend.net", "idioma": "dual", "grupo": "dual", "activo": true },
+    { "id": "otakstv", "nombre": "OtaksTV", "baseUrl": "https://otak.tv", "idioma": "latino", "grupo": "latino", "activo": true },
+    { "id": "animetwilight", "nombre": "AnimeTwilight", "baseUrl": "https://animetwilight.com", "idioma": "dual", "grupo": "dual", "activo": true },
+    { "id": "animeplus", "nombre": "AnimePlus", "baseUrl": "https://animeplus.vc", "idioma": "sub", "grupo": "sub", "activo": true },
+    { "id": "animenova", "nombre": "AnimeNova", "baseUrl": "https://www.animenova.org", "idioma": "sub", "grupo": "sub", "activo": true },
+    { "id": "animebuka", "nombre": "AnimeBuka", "baseUrl": "https://animebuka.com", "idioma": "sub", "grupo": "sub", "activo": true },
+    { "id": "animeflv_mirror", "nombre": "AnimeFLV Mirror", "baseUrl": "https://animeflv.info", "idioma": "sub", "grupo": "sub", "activo": false },
+    { "id": "animeonline_v1", "nombre": "AnimeOnline v1", "baseUrl": "https://animeonline.ninja", "idioma": "latino", "grupo": "latino", "activo": false }
+  ],
+  "tuning": {
+    "timeoutFuenteMs": 3000,
+    "timeoutFuenteDetalleMs": 7000,
+    "timeoutExtractorMs": 6000,
+    "cacheBuscarTtlSeg": 3600,
+    "cacheUltimosTtlSeg": 600,
+    "cacheDetalleTtlSeg": 21600,
+    "cacheServidoresTtlSeg": 21600,
+    "cronUltimosSeg": 600,
+    "prioridadServidores": ["mp4upload", "yourupload", "streamtape", "doodstream", "voe", "okru", "streamwish", "filemoon", "vidmoly", "streamsb", "m3u8", "mega"],
+    "reintentosHttp": 2
+  }
+}

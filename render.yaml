@@ -1,13 +1,14 @@
-# Configuración 1-clic para Render.com
-# Sube esta carpeta a GitHub y en Render elige "New Web Service";
-# Render detecta este archivo automáticamente.
+# ANIMAX · Deploy en Render (gratuito)
 services:
   - type: web
-    name: animax-server
+    name: animax-api
     runtime: node
     plan: free
-    buildCommand: echo "nada que instalar (cero dependencias)"
-    startCommand: node index.js
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true
     envVars:
-      - key: ANIMAX_API_KEY
-        sync: false   # opcional: defínela en el panel si quieres clave
+      - key: NODE_ENV
+        value: production
+    # Render inyecta PORT automáticamente

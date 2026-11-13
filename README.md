@@ -1,103 +1,141 @@
-# 🛰️ AniMax Server v6.0.0
+# ANIMAX v5.1 · Servidor de API (standalone)
 
-Servidor privado de búsqueda para la app AniMax — el mismo concepto que usa
-Seekee con su backend Buscari, pero **tuyo y gratis**: el teléfono lento ya no
-busca; le pregunta a este servidor y este hace el trabajo pesado.
+API multi-fuente de anime para la **app móvil ANIMAX** y para cualquier frontend.
+22 fuentes scrapeadas, búsqueda unificada paralela con alias (inglés ↔ romaji ↔
+siglas), deduplicación, **15 extractores de video encadenados** (Mp4Upload,
+YourUpload, StreamTape, Doodstream, Voe, Ok.ru, HLS, StreamWish, FileMoon,
+VidMoly, StreamSB, MixDrop, Upstream, FileLions, Mega) y **proxy de streaming**
+con CORS + Range + reescritura m3u8.
 
-- **Node.js puro, CERO dependencias** (no hay nada que instalar).
-- Sin anuncios, sin VIP, sin pagos, sin recolectar nada (no guarda nada: la
-  caché es en memoria y muere al reiniciar).
+## NOVEDADES v5.1 (ver `docs/CHANGELOG-V5.1.md`)
 
-**v6.0.0 (PLAN G · G2+G3) · PROVEEDORES REALES + ADBLOCK REFORZADO:**
+- **Lógica de dominio nueva** (`src/modulos/`): recomendaciones por **distancia
+  Jaccard** (géneros + tipo + año), **tendencias** con decaimiento exponencial
+  sobre los eventos de búsqueda, **programación semanal** lunes→domingo por
+  fuente y global, **tops** (valorados/vistos/género/década) con paginación,
+  **continuar viendo** con TTL 30 días y **listas de usuario** (favoritos,
+  viendo después) con persistencia JSON.
+- **Panel de administración web** en `GET /panel`: métricas en vivo, salud de
+  fuentes, logs y controles (purgar caché, cambiar dominio, suspender fuente).
+  HTML+CSS+JS embebidos, cero dependencias nuevas.
+- **3 extractores nuevos**: MixDrop, Upstream y FileLions — con un
+  **desempaquetador del packer p,a,c,k,e,d** real (sin `eval`).
+- **Métricas Prometheus** en texto plano (`GET /metrics` y
+  `GET /api/v1/metricas`) alimentadas por el bus de eventos.
+- **Semáforo de concurrencia** reutilizable (`src/core/semaforo.ts`).
+- **API admin** (`/api/v1/admin/…`): suspender/reanudar fuentes en caliente,
+  purgar caché, cambiar dominio, logs, chequeo manual.
+- **CLI de mantenimiento**: `npm run cli salud|fuentes|probar-fuente …`.
+- **Semilla de 26 películas reales** (Akira, Your Name, Spirited Away…) con
+  año, títulos latinos y alias propios: el catálogo de películas nunca
+  arranca vacío.
 
-- `GET /api/v1/app/episode/list?q={título}&episode={n}&lang={latino|castellano|sub|any}`
-  → **una llamada = fuentes reproducibles**: proveedores reales
-  (`allanime` GraphQL + `hianime` ajax, código original en `providers.js`)
-  con fallback al motor propio v3. Embeds resueltos en profundidad,
-  HLS/MP4 validados primero, `providerErrors` de diagnóstico.
-- `POST /api/v1/app/episode/resolve` `{showRef, episode, lang}` → fuentes de
-  un show ya identificado.
-- `GET /api/v1/ai/config` → quick prompts de IA en español servidos por este
-  server (sin credenciales de terceros; el chat usa `ANIMAX_AI_URL` opcional).
-- Adblock: EasyList digerida **+ `ad_hosts` fusionado (11,290 dominios)**
-  con persistencia en disco (`data/adblock-cache.json`) para sobrevivir a
-  reinicios de Render free.
-- `GET /api/v1/config/sources/status` incluye ahora la salud de cada
-  proveedor real (`providers`).
+## Estructura
 
-**v4.1.0 (FASE D0.5) · PÁGINAS PROPIAS UNIFICADAS (hub.js):** el servidor ahora
-**genera sus propias páginas H5** — el mismo sistema con el que Seekee muestra
-sus fichas (h5.otv.cc, dominios frescos por `queryFreshDomainList`) en vez de
-abrir TioAnime/MonosChinos:
+```
+index.ts               → ensamblado del app (app.use de cada router)
+src/rutas/             → 20 routers (ultimos, buscar, anime, servidores,
+                         stream, generos, catalogo, curados, cron, salud,
+                         estado, dominios + tendencias, programacion,
+                         recomendaciones, top, continuar, listas, admin)
+src/modulos/           → lógica de dominio v5.1 (recomendaciones,
+                         tendencias, programacionSemanal, listasTop,
+                         gestionContinuarViendo, listasUsuario, aniosAnime)
+src/panel/             → panel de administración web (GET /panel)
+src/cli/               → CLI de mantenimiento (npm run cli …)
+src/middleware/        → cors, seguridad, registro (logging con ids),
+                         limites (rate-limit), errores
+src/core/              → cola, reintentos, idioma, salud (circuit breaker),
+                         dominios (cambio en caliente), eventos (métricas),
+                         metricas (Prometheus), semaforo, fuentes (runtime)
+src/vigilante/         → watchdog de dominios alternativos (10 min)
+src/scrapers/          → 8 scrapers nuevos + reexporta los 14 previos
+src/extractores/       → 15 extractores individuales + fabricaExtractores
+                         (+ desempaquetar.ts del packer p,a,c,k,e,d)
+src/datos/             → curados, semillaCatalogo (~48 series),
+                         semillaPeliculas (26), aliasDb, aliasPeliculas
+src/config/            → fuentes.json, dominiosAlternativos.json, ajustes.json
+src/lib/animax/        → motor original (registro, dedupe, índice, cache…)
+data/                  → persistencia JSON de las listas de usuario
+docs/                  → API.md, CHANGELOG-V5.1.md, PANEL-ADMIN.md,
+                         RENDER-FREE.md, DEPLOY-RENDER.md, ANADIR-FUENTE.md,
+                         ANADIR-EXTRACTOR.md, CHANGELOG-V5.md
+```
 
-- `GET /hub` → portada propia: buscador + tendencias del ranking.
-- `GET /hub?q=one piece` → búsqueda propia: las tarjetas del motor agregado
-  (catálogo + web con `sourceList`) enlazan a la ficha propia de cada título.
-- `GET /hub/watch?u=…&t=…&src=…` → **ficha-watch propia**: episodios resueltos
-  por el servidor (grid en bloques de 50, dots de idioma), chips de
-  fuentes/servidores y DOBLE puente con la app:
-  - **H5 → nativo:** `AnimaxHub.postMessage(jsonBody)` con mensajes
-    `ready` / `servers` / `episodes` / `resolving` / `play` / `error`
-    (espejo del `javascriptChannel` del APK de Seekee).
-  - **nativo → H5:** `window.quan.switchSource(i)` y `quan.openEpisode(n)`
-    (mismos nombres que usa Seekee para cambiar de servidor).
-  - En un navegador normal (sin app) la misma página funciona sola: `<video>`
-    propio con cascada de espejos de respaldo.
-
-Batería de pruebas: `node test-faseD05-v4.js` (24 checks: puente, chips,
-bloques de 50, navigationList con el grupo "AniMax · Páginas propias", etc.).
-
-**v4.1.0 (FASE D1) · BLINDAJE: español SIEMPRE + cero caídas:**
-
-- **Bloqueo de idioma de raíz**: `classifyLang` detecta hits ingleses
-  ("english dub", "eng sub", "raw"…) → `'en'` y `groupOptions` los EXCLUYE —
-  las opciones de `/api/search` siempre son español (latino/castellano/sub).
-- **Idioma por espejo**: `POST /api/resolve` acepta `lang` y etiqueta CADA
-  espejo (`mirrors[].lang`) — la cascada del teléfono salta de servidor sin
-  cambiar de idioma.
-- **Hub con auto-curación**: el `play` lleva `lang` (y cada espejo el suyo);
-  `quan.autoNext(ep)` cambia de fuente del MISMO idioma y re-abre el episodio
-  solo (`animax.autoEp`) cuando una fuente no entrega espejos; el idioma de
-  la fuente primaria se infiere de la URL.
-
-Batería: `node test-faseD1-v4.js` (21 checks: bloqueo de inglés, lang en
-espejos, quan.autoNext, re-apertura del episodio, etc.).
-
-**Configuración en la app (v2.1.0):** Perfil → "Servidor de búsqueda (estilo
-Seekee)" → pega la URL de este servidor → Guardar → Probar conexión.
-Con el servidor configurado, la BÚSQUEDA de la app muestra el botón
-**"Ver en AniMax"** (página propia) y el navegador interno añade la sección
-**"Páginas AniMax"**.
-
-## Endpoints
+## Endpoints (documentados con ejemplos en `docs/API.md`)
 
 | Método | Ruta | Qué hace |
 |---|---|---|
-| GET | `/hub` | **Página propia**: portada con buscador y tendencias |
-| GET | `/hub?q=one piece` | **Página propia**: búsqueda unificada |
-| GET | `/hub/watch?u=…` | **Página propia**: ficha-watch con puente AnimaxHub + `quan` |
-| GET | `/api/ping` | Estado del servidor |
-| GET | `/api/search?q=one piece` | Opciones estilo Seekee: `[Doblado] One Piece`, `[Sub] One Piece` + descripción en español |
-| GET | `/api/episodes?pageUrl=…` | Lista COMPLETA de episodios de una serie (sin límite de 12) |
-| POST | `/api/resolve` | `{pageUrl, episode?}` → servidores de video ordenados, validados y con sus headers (User-Agent + Referer) |
-| POST | `/api/validate` | `{url, referer?}` → ¿el stream sirve? |
-| GET | `/api/v1/*` | Capa espejo de la API Buscari de Seekee (47 endpoints — ver `v4-api.js`) |
+| GET | `/` | Healthcheck raíz + resumen de fuentes |
+| GET | `/api/v1/ultimos` | Últimos episodios de las 22 fuentes (caché 10 min) |
+| GET | `/api/v1/buscar?q=` | Búsqueda unificada + alias (caché 1 h) |
+| GET | `/api/v1/anime/{slug}` | Detalle + episodios (LATINO primero) |
+| GET | `/api/v1/servidores/{slug}/{ep}` | Servidores verificados con link directo |
+| GET | `/api/v1/stream?url=&ref=&raw=` | **Proxy de streaming** (mp4/m3u8, Range) |
+| GET | `/api/v1/generos` | Géneros disponibles con conteo |
+| GET | `/api/v1/catalogo?idioma=&genero=&tipo=` | Catálogo (latino incluye dual; `tipo=pelicula` con semilla de 26 pelis) |
+| GET | `/api/v1/curados` | Destacados curados |
+| GET | `/api/v1/tendencias?ventana=&limite=` | **Tendencias** con decaimiento exponencial (1 h..168 h) |
+| GET | `/api/v1/tendencias/busquedas` | Últimas 30 búsquedas crudas |
+| GET | `/api/v1/programacion?fuente=` | **Programación semanal** (lunes→domingo) |
+| GET | `/api/v1/programacion/fuentes` | Calendario desglosado por fuente |
+| GET | `/api/v1/recomendaciones/{slug}?limite=&idioma=` | **Similares** (Jaccard géneros + tipo + año) |
+| GET | `/api/v1/top/valorados?pagina=&limite=` | Top mejor valorados (paginado) |
+| GET | `/api/v1/top/vistos?pagina=&limite=` | Top más vistos (feed + valoración + latino) |
+| GET | `/api/v1/top/genero?genero=` | Top por género (paginado) |
+| GET | `/api/v1/top/decada?decada=` | Top por década (1990s, 90, 1980…) |
+| GET | `/api/v1/top/decadas` | Décadas disponibles con conteo |
+| POST | `/api/v1/continuar?usuario=` | Marca progreso (continuar viendo) |
+| GET | `/api/v1/continuar?usuario=&limite=` | Pendientes de seguir viendo (TTL 30 días) |
+| GET | `/api/v1/historial?usuario=&pagina=` | Historial paginado por usuario |
+| GET/DELETE | `/api/v1/continuar/{slug}?usuario=` | Progreso de un anime / olvidarlo |
+| POST | `/api/v1/continuar/reiniciar?usuario=` | Borra todo el historial del usuario |
+| GET/POST | `/api/v1/listas?usuario=` | Listas del usuario (favoritos y ver-despues garantizados) |
+| POST | `/api/v1/listas/{nombre}/items?usuario=` | Añade un anime a una lista |
+| DELETE | `/api/v1/listas/{nombre}/items/{slug}?usuario=` | Quita un anime |
+| POST | `/api/v1/listas/mover?usuario=` | Mueve un anime entre listas |
+| GET | `/api/v1/salud` | Estado de cada fuente (circuit breaker) |
+| GET | `/api/v1/estado` | Métricas: caché, peticiones, colas, extractores, usuarios |
+| GET | `/api/v1/dominios` | Inventario de dominios activos/alternativos |
+| POST | `/api/v1/dominios/{fuente}` | Cambio de dominio en caliente |
+| POST | `/api/v1/dominios/{fuente}/reset` | Restaura el dominio oficial |
+| GET/POST | `/api/v1/cron/refresh` | Refresca el caché de portada |
+| GET | `/api/v1/admin/estado` | Vista global del server (la usa el panel) |
+| GET | `/api/v1/admin/fuentes` | Inventario runtime + salud por fuente |
+| POST | `/api/v1/admin/fuentes/{id}/suspender` | Suspende la fuente en caliente |
+| POST | `/api/v1/admin/fuentes/{id}/reanudar` | La reanuda |
+| POST | `/api/v1/admin/cache/purgar` | Purga caché (namespace o todo) |
+| POST | `/api/v1/admin/dominios/{fuente}` | Cambio de dominio (vía admin) |
+| POST | `/api/v1/admin/chequear-fuentes` | Sonda manual de las 22 fuentes |
+| GET | `/api/v1/admin/logs` | Últimas 100 peticiones |
+| POST | `/api/v1/admin/listas/guardar` | Persiste las listas a data/ |
+| GET | `/metrics` · `/api/v1/metricas` | **Métricas Prometheus** (texto plano) |
+| GET | `/panel` | **Panel de administración web** (docs/PANEL-ADMIN.md) |
 
-## Ejecutar localmente
+El **slug** de un anime es `ded:{tituloNormalizado}` (deduplicado) o
+`{fuente}~{slugLocal}` (una fuente concreta).
+
+## Desarrollo
 
 ```bash
-node index.js          # puerto 3001
-PORT=8080 node index.js
+npm install
+npm run dev        # tsx watch index.ts
+npm start          # tsx index.ts (lo usa Render y el Dockerfile)
+npm run cli salud  # CLI de mantenimiento (sin arrancar el server)
 ```
 
-## Desplegarlo gratis en internet
+## Deploy
 
-Lee **GUIA-CREAR-SERVIDOR.md** (paso a paso para principiante total:
-GitHub → Render.com → tu URL en 15 minutos, $0).
+- **Render**: guía completa en `docs/DEPLOY-RENDER.md` (render.yaml ya
+  incluido: build `npm install`, start `npm start`, healthcheck `/`).
+- **Docker**: `docs/DEPLOY-RENDER.md` § VPS (`docker build -t animax-api .`).
 
-## Variables de entorno
+## Notas de red
 
-| Variable | Default | Para qué |
-|---|---|---|
-| `PORT` | `3001` | Puerto (Render/Fly lo inyectan solos) |
-| `ANIMAX_API_KEY` | *(vacío = abierto)* | Si se define, exige cabecera `X-Api-Key` (las páginas del hub aceptan `?key=…`) |
+- Render/VPS salen con IPs de datacenter: algunas fuentes bloqueadas en un
+  entorno pueden funcionar desde otro y viceversa. El **vigilante** y el
+  endpoint de dominios en caliente permiten reaccionar sin redeploy.
+- El plan FREE de Render apaga el servicio tras inactividad: usa un cron
+  externo (cron-job.org) que llame `/api/v1/cron/refresh` cada 10 min, o
+  deja abierto el panel `/panel` (se refresca solo). Guía completa y honesta
+  en `docs/RENDER-FREE.md`.
