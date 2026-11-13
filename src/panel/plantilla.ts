@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-// ANIMAX v5.1 · PLANTILLA HTML del panel de administración
+// ANIMAX v5.3 · PLANTILLA HTML del panel de administración
 // (servida por el propio server en GET /panel). Sin dependencias
 // nuevas: el CSS y el JS van EMBEBIDOS en el propio documento
 // (src/panel/estilos.ts y src/panel/guion.ts exportan strings).
@@ -16,7 +16,7 @@ export function plantillaPanel(op: { css: string; js: string }): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ANIMAX v5.1 · Panel de administración</title>
+<title>ANIMAX v5.3 · Panel de administración</title>
 <link rel="icon" href="/img/icono.png">
 <style>
 ${op.css}
@@ -26,7 +26,7 @@ ${op.css}
 <header class="cab">
   <img src="/img/icono.png" alt="ANIMAX" class="logo">
   <div>
-    <h1>ANIMAX <span class="ver">v5.1</span></h1>
+    <h1>ANIMAX <span class="ver">v5.3</span></h1>
     <p class="sub">Panel de administración · <span id="puerto-info">servidor standalone</span></p>
   </div>
   <div class="estado-global" id="estado-global">…</div>
@@ -112,7 +112,7 @@ ${op.css}
 </main>
 
 <footer class="pie-final">
-  <p>ANIMAX v5.1 · 22 fuentes · 15 extractores · proxy de streaming · watchdog de dominios · <a href="/api/v1/estado" target="_blank">/api/v1/estado</a> · <a href="/api/v1/admin/estado" target="_blank">/api/v1/admin/estado</a></p>
+  <p>ANIMAX v5.3 · 22 fuentes · 15 extractores · proxy de streaming · watchdog de dominios · sondeo adaptativo (backoff escalado) · <a href="/api/v1/estado" target="_blank">/api/v1/estado</a> · <a href="/api/v1/admin/estado" target="_blank">/api/v1/admin/estado</a></p>
 </footer>
 
 <script>

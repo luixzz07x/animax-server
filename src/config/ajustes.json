@@ -1,5 +1,5 @@
 {
-  "$comentario": "ANIMAX v5.2-FIX · Ajustes de runtime AJUSTADOS PARA RENDER FREE. El plan gratuito tiene UNA CPU compartida y arranque frío: timeouts largos, sondas por lotes, circuit breaker lento y vigilante que no conmuta dominios al primer fallo. Editable sin recompilar: se lee al arrancar.",
+  "$comentario": "ANIMAX v5.3-FIX · Ajustes de runtime AJUSTADOS PARA RENDER FREE. v5.3: sondeo adaptativo con backoff escalado (las fuentes que no responden desde la IP del datacenter se sondean cada vez menos: 2→4→8→16→30 min) y estado 'limitada' honesto en panel/portada. Editable sin recompilar: se lee al arrancar.",
   "servidor": {
     "puertoPorDefecto": 3001,
     "limiteBody": "1mb",
@@ -40,7 +40,10 @@
     "intervaloChequeoMs": 600000,
     "graciaArranqueMs": 180000,
     "loteSonda": 4,
-    "pausaLoteMs": 900
+    "pausaLoteMs": 900,
+    "backoffBaseMs": 120000,
+    "backoffMaxMs": 1800000,
+    "limitadaTrasAperturas": 4
   },
   "vigilante": {
     "intervaloMs": 900000,

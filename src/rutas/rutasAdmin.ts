@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-// ANIMAX v5.1 · Router /api/v1/admin — API de ADMINISTRACIÓN:
+// ANIMAX v5.3 · Router /api/v1/admin — API de ADMINISTRACIÓN:
 // estado de fuentes, suspensión/reanudación en caliente, cambio
 // de dominio, purga de caché, métricas Prometheus y logs.
 //   GET  /api/v1/admin/estado        → vista global (panel)
@@ -12,6 +12,8 @@
 //   GET  /api/v1/admin/logs          → últimas 100 peticiones
 //   GET  /metrics                    → texto Prometheus (scrape)
 //   GET  /api/v1/metricas            → mismo texto (API)
+// v5.3: el detalle incluye bloqueada(CF) / limitada(IP DC) para que
+// el panel muestre la situación REAL de cada fuente en Render free.
 // ─────────────────────────────────────────────────────────────
 
 import { Router, type Request, type Response } from "express";
@@ -53,7 +55,7 @@ routerAdmin.get(
     res.json({
       ok: true,
       servidor: {
-        version: "5.1.0",
+        version: "5.3.0",
         node: process.version,
         uptimeSeg: Math.floor(process.uptime()),
         memoria: {
@@ -75,6 +77,10 @@ routerAdmin.get(
             circuito: s?.circuito ?? "n/a",
             fallosConsecutivos: s?.fallosConsecutivos ?? 0,
             latenciaMs: s?.ultimaLatenciaMs ?? null,
+            bloqueada: s?.bloqueada ?? false,
+            limitada:
+              s?.circuito === "abierto" && (s?.aperturas ?? 0) >= 4 ? true : false,
+            aperturas: s?.aperturas ?? 0,
           };
         }),
       },
@@ -107,6 +113,9 @@ routerAdmin.get(
             fallosConsecutivos: s?.fallosConsecutivos ?? 0,
             latenciaMs: s?.ultimaLatenciaMs ?? null,
             ultimoExito: s?.ultimoExito ?? null,
+            bloqueada: s?.bloqueada ?? false,
+            limitada:
+              s?.circuito === "abierto" && (s?.aperturas ?? 0) >= 4 ? true : false,
           };
         }),
       },

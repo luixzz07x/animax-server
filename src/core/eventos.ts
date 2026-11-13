@@ -55,6 +55,10 @@ export interface CargaCicloSalud {
   vivas: number;
   bloqueadas: number;
   muertas: number;
+  /** v5.3: fuentes omitidas este ciclo (circuito abierto pendiente). */
+  omitidas?: number;
+  /** v5.3: fuentes limitadas por bloqueo sostenido (IP datacenter). */
+  limitadas?: number;
   ms: number;
 }
 
@@ -136,29 +140,33 @@ export function instantanea(): InstantaneaMetricas {
   };
 }
 
-/** Log por consola de los eventos clave — ANTI-SPAM (FIX v5.2):
- *  - "fuente-fallo": solo se loguea la TRANSICIÓN a circuito abierto o
- *    como máximo una vez por fuente cada 10 min (antes: 20 líneas/ciclo
- *    ×3 sistemas = cientos de líneas que ahogaban los logs de Render).
- *  - "ciclo-salud": resumen agregado de una línea por ciclo de salud. */
+/** Log por consola de los eventos clave — ANTI-SPAM v5.3:
+ *  - "fuente-fallo": SOLO se loguean las transiciones relevantes
+ *    (circuito que se abre, o reintento vencido que vuelve a fallar
+ *    con su backoff). Los fallos repetidos de fuentes ya abiertas NO
+ *    se loguean (eran los cientos de `[salud] X falló` del arranque).
+ *  - "ciclo-salud": resumen agregado de una línea (con omitidas y
+ *    limitadas — la situación real en Render free). */
 const ultimoLogFallo = new Map<string, number>();
-const INTERVALO_LOG_FALLO_MS = 10 * 60 * 1000;
+const INTERVALO_LOG_FALLO_MS = 30 * 60 * 1000;
 
 suscribir("fuente-fallo", (c) => {
-  const transicion = (c.detalle || "").includes("circuito");
+  const detalle = c.detalle || "";
+  const transicion = detalle.includes("circuito");
+  const reintentoFallido = detalle.includes("sigue sin respuesta");
   const previo = ultimoLogFallo.get(c.fuente) ?? 0;
-  if (transicion || Date.now() - previo > INTERVALO_LOG_FALLO_MS) {
-    if (transicion) {
-      console.log(`[salud] ${c.fuente}: CIRCUITO ABIERTO (omita ~2 min)${c.detalle ? ` · ${c.detalle}` : ""}`);
-    } else {
-      console.log(`[salud] ${c.fuente} falló${c.detalle ? ` (${c.detalle})` : ""}`);
-    }
+  if (
+    transicion ||
+    reintentoFallido ||
+    Date.now() - previo > INTERVALO_LOG_FALLO_MS
+  ) {
+    console.log(`[salud] ${c.fuente} falló${detalle ? ` (${detalle})` : ""}`);
     ultimoLogFallo.set(c.fuente, Date.now());
   }
 });
 suscribir("ciclo-salud", (c) => {
   console.log(
-    `[salud] ciclo: ${c.total} fuentes · ${c.vivas} vivas · ${c.bloqueadas} bloqueadas(CF) · ${c.muertas} sin respuesta (${c.ms}ms)`
+    `[salud] ciclo: ${c.total} fuentes · ${c.vivas} vivas · ${c.bloqueadas} bloqueadas(CF) · ${c.muertas} sin respuesta · ${c.omitidas ?? 0} en espera · ${c.limitadas ?? 0} limitadas (IP DC) (${c.ms}ms)`
   );
 });
 suscribir("dominio-cambiado", (c) => {

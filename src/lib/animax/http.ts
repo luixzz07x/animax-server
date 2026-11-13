@@ -6,7 +6,7 @@
 //  - NUNCA lanza: devuelve null y el registro hace failover
 // ─────────────────────────────────────────────────────────────
 
-import { Agent, fetch as undiciFetch } from "undici";
+import { Agent, ProxyAgent, fetch as undiciFetch } from "undici";
 import tuning from "./fuentes.json";
 import { reescribirDominio } from "../../core/dominios";
 
@@ -21,6 +21,17 @@ const agente = new Agent({
   headersTimeout: 15_000,
   bodyTimeout: 20_000,
 });
+
+// v5.3: PROXY OPCIONAL — si defines PROXY_URL en Render (Environment),
+// TODO el scraping sale por ese proxy (ideal: proxy residencial).
+// Es la forma de revivir las fuentes "limitadas" que Cloudflare no
+// deja responder desde la IP del datacenter de Render free.
+// Ej.: PROXY_URL=http://usuario:clave@host:puerto  (HTTP/HTTPS proxy)
+const proxyUrl = process.env.PROXY_URL || "";
+const despachador = proxyUrl
+  ? new ProxyAgent({ uri: proxyUrl, token: process.env.PROXY_AUTH || undefined })
+  : agente;
+if (proxyUrl) console.log(`[http] scraping con proxy (${new URL(proxyUrl).hostname})`);
 
 interface RespuestaHttpMin {
   ok: boolean;
@@ -65,7 +76,7 @@ async function intentoUnico(url: string, op: OpcionesHttp): Promise<RespuestaHtt
       method: "GET",
       signal: ctrl.signal,
       redirect: "follow",
-      dispatcher: agente,
+      dispatcher: despachador,
       headers: {
         "User-Agent": siguienteUA(),
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.6",

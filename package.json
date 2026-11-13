@@ -1,7 +1,7 @@
 {
   "name": "animax-server",
-  "version": "5.2.0",
-  "description": "ANIMAX v5.1 · API multi-fuente de anime (22 fuentes scrapeadas, catálogo unificado, 15 extractores de video encadenados, proxy de streaming con CORS+Range, watchdog de dominios, circuit breaker, rate-limit, recomendaciones Jaccard, tendencias con decaimiento exponencial, programación semanal, tops, continuar-viendo y listas de usuario, panel de administración /panel y métricas Prometheus) — servidor standalone para Render/VPS",
+  "version": "5.3.0",
+  "description": "ANIMAX v5.3 · API multi-fuente de anime (22 fuentes scrapeadas, catálogo unificado, 15 extractores de video encadenados, proxy de streaming con CORS+Range, watchdog de dominios, circuit breaker, rate-limit, recomendaciones Jaccard, tendencias con decaimiento exponencial, programación semanal, tops, continuar-viendo y listas de usuario, panel de administración /panel y métricas Prometheus) — servidor standalone para Render/VPS · v5.3: sondeo adaptativo con backoff escalado, estado limitada/bloqueada honesto, keep-awake y proxy opcional (PROXY_URL)",
   "private": true,
   "main": "index.ts",
   "scripts": {
@@ -17,7 +17,7 @@
     "cheerio": "^1.2.0",
     "compression": "^1.7.4",
     "express": "^4.21.2",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.15",
     "undici": "^8.12.4"
   },
   "devDependencies": {

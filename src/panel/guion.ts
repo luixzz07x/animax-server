@@ -44,11 +44,17 @@ export const guionPanel = `
       var c = j.cache || {};
       $("k-cache").textContent = String(c.entradas || 0);
       $("k-cache-detalle").textContent = "hits " + (c.hits || 0) + " · fallos " + (c.fallos || 0);
-      var salud = (j.fuentes && j.fuentes.salud) || { total: 0, vivas: 0, caidas: 0 };
+      var salud = (j.fuentes && j.fuentes.salud) || { total: 0, vivas: 0, caidas: 0, limitadas: 0, bloqueadas: 0 };
+      // v5.3: resumen HONESTO — vivas reales (circuito cerrado con éxito
+      // o bloqueada-CF alcanzable), caídas reales (circuito abierto) y
+      // limitadas (sin respuesta sostenida desde la IP del datacenter).
       $("k-fuentes").textContent = salud.vivas + "/" + salud.total;
-      $("k-fuentes-detalle").textContent = "caídas " + salud.caidas;
+      $("k-fuentes-detalle").textContent =
+        "caídas " + salud.caidas + " · limitadas " + (salud.limitadas || 0) + " · bloqueadas " + (salud.bloqueadas || 0);
       $("estado-global").textContent =
-        salud.caidas === 0 ? "TODO OPERATIVO" : salud.vivas + " vivas · " + salud.caidas + " caídas";
+        salud.caidas === 0 && (salud.limitadas || 0) === 0
+          ? "TODO OPERATIVO"
+          : salud.vivas + " vivas · " + salud.caidas + " caídas · " + (salud.limitadas || 0) + " limitadas";
       pintarFuentes(j.fuentes.detalle || []);
     } catch (e) {
       $("estado-global").textContent = "sin respuesta del server";
@@ -65,6 +71,14 @@ export const guionPanel = `
       var chip = suspendida
         ? '<span class="chip chip-suspendida">suspendida</span>'
         : '<span class="chip chip-' + esc(f.circuito) + '">' + esc(f.circuito) + "</span>";
+      // v5.3: estado REAL por fuente (antes todo "activa")
+      var estadoReal = suspendida
+        ? "—"
+        : f.limitada === true
+          ? "limitada (IP DC)"
+          : f.bloqueada === true
+            ? "bloqueada (CF)"
+            : "activa";
       var acciones = suspendida
         ? '<button class="btn btn-mini btn-sec" data-reanudar="' + esc(f.id) + '">Reanudar</button>'
         : '<button class="btn btn-mini btn-sec" data-suspender="' + esc(f.id) + '">Suspender</button>';
@@ -78,7 +92,7 @@ export const guionPanel = `
         "<td>" + chip + "</td>" +
         "<td>" + esc(f.fallosConsecutivos) + "</td>" +
         "<td>" + (f.latenciaMs == null ? "—" : esc(f.latenciaMs) + " ms") + "</td>" +
-        "<td>" + (suspendida ? "—" : "activa") + "</td>" +
+        "<td>" + estadoReal + "</td>" +
         "<td>" + acciones + "</td></tr>";
     }
     tbody.innerHTML = html;

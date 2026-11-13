@@ -19,6 +19,7 @@
 
 import express from "express";
 import compression from "compression";
+import path from "node:path";
 
 import { middlewareCors } from "./src/middleware/cors";
 import { middlewareSeguridad } from "./src/middleware/seguridad";
@@ -63,6 +64,28 @@ app.use(middlewareSeguridad);
 app.use(middlewareRegistro);
 app.use(limitesApi);
 
+// ── v5.3: assets estáticos (public/img + public/fonts) ────────
+// Antes GET /img/icono.png daba 404 (el panel pedía un icono que el
+// server no servía) y las 20 fuentes TTF de public/fonts tampoco se
+// podían descargar. Caché larga: son archivos inmutables por versión.
+const PUBLICO = path.resolve(import.meta.dirname, "public");
+app.use(
+  "/img",
+  express.static(path.join(PUBLICO, "img"), {
+    fallthrough: true,
+    maxAge: "7d",
+    setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),
+  })
+);
+app.use(
+  "/fonts",
+  express.static(path.join(PUBLICO, "fonts"), {
+    fallthrough: true,
+    maxAge: "30d",
+    setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),
+  })
+);
+
 // ── Routers (cada uno monta sus rutas completas) ──────────────
 app.use(routerSalud); // GET / · GET /api/v1/salud
 app.use(routerUltimos); // GET /api/v1/ultimos
@@ -100,15 +123,35 @@ setTimeout(() => void refrescar().catch(() => undefined), 8000).unref?.();
 setInterval(() => void refrescar().catch(() => undefined), INTERVALO);
 // Calienta la lista curada de destacados al arrancar
 setTimeout(() => calentarCurados(), 12000).unref?.();
-// Circuit breaker + health-check periódico de las 22 fuentes
+// Circuit breaker + health-check adaptativo de las 22 fuentes
 iniciarSaludPeriodica();
-// Watchdog de dominios alternativos (cada 10 min)
+// Watchdog de dominios alternativos (solo fuentes con reintento vencido)
 iniciarVigilante();
+
+// ── v5.3: KEEP-AWAKE (plan free de Render duerme a los 15 min) ─
+// El server se hace un ping a sí mismo cada 10 min por su URL pública
+// (RENDER_EXTERNAL_URL la inyecta Render). Desactivable con
+// MANTENER_DESPIERTO=0. Con la pestaña del panel abierta también se
+// mantiene despierto (refresco cada 10 s), pero esto cubre el resto.
+const URL_EXTERNA = process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || "";
+if (URL_EXTERNA && process.env.MANTENER_DESPIERTO !== "0") {
+  const ping = () =>
+    fetch(`${URL_EXTERNA}/api/v1/salud`, {
+      headers: { "User-Agent": "animax-keepalive/5.3", Accept: "application/json" },
+      signal: AbortSignal.timeout(20000),
+    })
+      .then((r) => r.body?.cancel())
+      .catch(() => undefined);
+  const t = setInterval(() => void ping(), 10 * 60 * 1000);
+  if (typeof t.unref === "function") t.unref();
+  setTimeout(() => void ping(), 4 * 60 * 1000).unref?.();
+  console.log(`[keep-awake] activo · ping propio cada 10 min a ${URL_EXTERNA}`);
+}
 
 // ── Arranque ──────────────────────────────────────────────────
 const PUERTO = parseInt(process.env.PORT || "3001", 10);
 app.listen(PUERTO, () => {
-  console.log(`[animax-server v5.2] escuchando en :${PUERTO} (22 fuentes · 15 extractores · panel /panel)`);
+  console.log(`[animax-server v5.3] escuchando en :${PUERTO} (22 fuentes · 15 extractores · panel /panel)`);
 });
 
 export default app;

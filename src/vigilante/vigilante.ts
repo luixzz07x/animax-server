@@ -1,18 +1,17 @@
 // ─────────────────────────────────────────────────────────────
-// ANIMAX v5.2-FIX · VIGILANTE (watchdog de dominios).
+// ANIMAX v5.3-FIX · VIGILANTE (watchdog de dominios).
 //
-// Cambios del fix (ver README-FIX-RENDER.md):
+// Cambios acumulados del fix para Render free (ver README-FIX-RENDER.md):
 //  1. YA NO cambia el dominio por UNA falla: exige `fallosAntesDeConmutar`
-//     ciclos consecutivos fallidos (antes conmutaba al primer fallo y
-//     volaba a dominios muertos: animefenix.tv→.net, monoschinos…).
-//  2. YA NO sondea fuentes sanas: reutiliza el resultado del health-check
-//     (salud) — fuentes con éxito reciente se saltan (antes se probaba
-//     DOS veces cada web por ciclo: salud + vigilante).
-//  3. YA NO alimenta el circuit breaker con sus propias sondas: solo
-//     marca "sin dominios vivos" cuando de verdad no hay ninguno.
-//  4. RECUPERACIÓN: si el dominio oficial vuelve a responder, se
-//     restaura (antes un dominio conmutado quedaba pegado para siempre).
+//     ciclos consecutivos fallidos.
+//  2. YA NO sondea fuentes sanas: reutiliza el resultado del health-check.
+//  3. YA NO alimenta el circuit breaker con sus propias sondas.
+//  4. RECUPERACIÓN: si el dominio oficial vuelve a responder, se restaura.
 //  5. Lotes pequeños con pausa (CPU del plan free de Render).
+//  6. v5.3: SOLO atiende fuentes con reintento VENCIDO (sondeaVencida):
+//     las abiertas pendientes de backoff se saltan por completo — el
+//     vigilante deja de re-sondear cada 15 min las 15 fuentes que
+//     Cloudflare/datacenter no deja responder desde Render.
 // ─────────────────────────────────────────────────────────────
 
 import ajustesJson from "../config/ajustes.json";
@@ -26,7 +25,12 @@ import {
   registrarDominio,
   restablecerDominio,
 } from "../core/dominios";
-import { instantaneaSalud, registrarExito, registrarFallo } from "../core/salud";
+import {
+  instantaneaSalud,
+  registrarExito,
+  registrarFallo,
+  sondeaVencida,
+} from "../core/salud";
 import { emitir } from "../core/eventos";
 
 interface AjustesVigilante {
@@ -96,16 +100,22 @@ export async function cicloVigilante(): Promise<CicloVigilante> {
   const ahora = Date.now();
   const exitoReciente = AJ.exitoRecienteMs ?? 300000;
 
-  // ── 1) Seleccionar objetivo: fuentes SIN éxito reciente ──
-  // (las sanas ya las validó el health-check: no se re-sondean)
+  // ── 1) Seleccionar objetivo: SOLO fuentes que necesitan atención ──
+  // (v5.3: las abiertas PENDIENTES de reintento se saltan por completo
+  //  — salud ya las omitió; el vigilante no vuelve a gastar sondas en
+  //  fuentes cuyo backoff no ha vencido. Las sanas tampoco se tocan.)
   const salud = new Map(instantaneaSalud().map((e) => [e.id, e]));
   const objetivo = FUENTES.filter((f) => {
     if (f.activo === false) return false;
     const e = salud.get(f.id);
     if (!e) return true; // nunca sondeada → hay que comprobarla
-    if (e.circuito === "abierto") return true; // caída → candidata a dominio nuevo
-    if (e.ultimoExito !== null && ahora - e.ultimoExito < exitoReciente) return false;
-    return true; // sin éxito reciente → comprobar
+    if (e.circuito === "cerrado") {
+      // Sana o calentando: la cubre el health-check salvo éxito muy viejo
+      if (e.ultimoExito !== null && ahora - e.ultimoExito < exitoReciente) return false;
+      return sondeaVencida(f.id);
+    }
+    if (e.circuito === "abierto") return sondeaVencida(f.id); // reintento vencido
+    return false; // semiabierto: en prueba por salud, no duplicar
   });
 
   const caidas: string[] = [];

@@ -1,12 +1,11 @@
 // ─────────────────────────────────────────────────────────────
-// ANIMAX v5.2-FIX · Router de SALUD.
-//  - GET /              → PORTADA HTML (antes era JSON crudo — así la
-//                          raíz del server de Render se ve como una
-//                          página de verdad). ¿JSON? → ?formato=json
+// ANIMAX v5.3-FIX · Router de SALUD.
+//  - GET /              → PORTADA HTML (¿JSON? → ?formato=json)
 //  - GET /api/v1        → listado JSON de endpoints (documentado).
 //  - GET /api/v1/salud  → estado de CADA fuente: circuito breaker,
-//                          fallos consecutivos, latencia, dominio y si
-//                          está bloqueada por Cloudflare.
+//                          fallos consecutivos, latencia, dominio,
+//                          bloqueo Cloudflare y si está LIMITADA
+//                          (sin respuesta sostenida desde el datacenter).
 // ─────────────────────────────────────────────────────────────
 
 import { Router } from "express";
@@ -45,7 +44,7 @@ const ENDPOINTS = [
 function resumenJson() {
   return {
     ok: true,
-    servicio: "ANIMAX API v5.2",
+    servicio: "ANIMAX API v5.3",
     uptime: Math.floor(process.uptime()),
     fuentes: resumenSalud(),
     alias: totalAlias(),
@@ -72,6 +71,7 @@ routerSalud.get(
     const chips = [
       { etiqueta: "vivas", valor: r.vivas, color: "#22c55e" },
       { etiqueta: "bloqueadas (CF)", valor: r.bloqueadas, color: "#f59e0b" },
+      { etiqueta: "limitadas (IP DC)", valor: r.limitadas, color: "#a855f7" },
       { etiqueta: "caídas", valor: r.caidas, color: "#ef4444" },
       { etiqueta: "alias", valor: totalAlias(), color: "#a1a1aa" },
     ];
@@ -151,7 +151,8 @@ routerSalud.get(
     <h1>API en línea</h1>
     <p class="sub">
       ${r.total} fuentes · ${r.vivas} vivas · ${r.bloqueadas} bloqueadas por
-      Cloudflare (alcanzables) · ${r.caidas} caídas.
+      Cloudflare (alcanzables) · ${r.limitadas} limitadas por IP de datacenter ·
+      ${r.caidas} caídas.
       Semilla offline: ${s.total} animes y películas — la app nunca se queda vacía.
     </p>
     <div class="chips">${chipsHtml}</div>
@@ -187,14 +188,19 @@ routerSalud.get(
       circuito: {
         leyenda: {
           cerrado: "funcionando con normalidad",
-          abierto: "caída: se omite hasta el enfriamiento",
-          semiabierto: "en prueba tras el enfriamiento",
+          abierto: "caída: se omite hasta que vence su reintento escalado",
+          semiabierto: "en prueba tras el reintento",
         },
       },
       bloqueadas: {
         explicacion:
           "fuentes alcanzables pero tras el challenge de Cloudflare: NO se omite su scraping",
         ids: resumen.fuentesBloqueadas,
+      },
+      limitadas: {
+        explicacion:
+          "sin respuesta sostenida desde la IP del datacenter de Render (típico bloqueo anti-bot de Cloudflare/proveedores): se re-sondean con backoff de hasta 30 min y reviven solas si vuelven a responder",
+        ids: resumen.fuentesLimitadas,
       },
     });
   })
